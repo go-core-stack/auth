@@ -61,6 +61,9 @@ type Validator interface {
 	// Validate checks the HMAC signature, timestamp, and expiration of the request.
 	// Returns true if valid, false and an error otherwise.
 	Validate(r *http.Request, secret string) (bool, error)
+
+	// Check if Api Key is in use
+	GetKeyId(r *http.Request) string
 }
 
 // validator is a concrete implementation of the Validator interface.
@@ -127,6 +130,10 @@ func (v *validator) Validate(r *http.Request, secret string) (bool, error) {
 	}
 
 	return true, nil
+}
+
+func (v *validator) GetKeyId(r *http.Request) string {
+	return r.Header.Get("x-api-key-id")
 }
 
 // NewValidator creates a new Validator instance for validating HTTP requests.
