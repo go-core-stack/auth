@@ -77,7 +77,7 @@ Signing HTTP Requests:
 // Returns the HMAC as a byte slice (not hex-encoded).
 func generateSHA256HMAC(secret string, v ...string) []byte {
 	// Concatenate all input strings into a single string
-	raw := strings.Join(v, "")
+	raw := strings.Join(v, "\n")
 
 	// Create a new HMAC hasher using SHA-256 and the provided secret key
 	h := hmac.New(sha256.New, []byte(secret))
@@ -135,13 +135,13 @@ func (g *generator) AddAuthHeaders(r *http.Request) *http.Request {
 	sig := GenerateSHA256HMAC(g.secret, r.Method, r.URL.Path, timeStamp)
 
 	// Add the computed signature to the request headers
-	r.Header.Add("x-signature", sig)
+	r.Header.Add(apiKeySignatureHeader, sig)
 
 	// Add the API key ID to the request headers
-	r.Header.Add("x-api-key-id", g.id)
+	r.Header.Add(apiKeyIdHeader, g.id)
 
 	// add timestamp to header
-	r.Header.Add("x-timestamp", timeStamp)
+	r.Header.Add(apiKeyTimestampHeader, timeStamp)
 	return r
 }
 

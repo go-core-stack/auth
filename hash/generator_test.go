@@ -15,7 +15,7 @@ func Test_HashGeneration(t *testing.T) {
 
 	sig := GenerateSHA256HMAC(secret, method, path, timestamp)
 
-	if sig != "2c269d572fbd6b324b5f6eb1cf06bed60811b43a82642d5f7f438b65160caa08" {
+	if sig != "04a41d00f2f133c8746d11c7d3d5bfc547fc514b583e3798b1df2c9c09204461" {
 		t.Errorf("generated HMAC signature doesn't match as expected")
 	}
 }
