@@ -95,7 +95,7 @@ func (v *validator) Validate(r *http.Request, secret string) (bool, error) {
 	}
 
 	// Retrieve the signature from the header
-	sigStr := r.Header.Get("x-signature")
+	sigStr := r.Header.Get(apiKeySignatureHeader)
 	if sigStr == "" {
 		return false, fmt.Errorf("missing signature header")
 	}
@@ -107,7 +107,7 @@ func (v *validator) Validate(r *http.Request, secret string) (bool, error) {
 	}
 
 	// Retrieve the timestamp from the header
-	timeStr := r.Header.Get("x-timestamp")
+	timeStr := r.Header.Get(apiKeyTimestampHeader)
 	if timeStr == "" {
 		return false, fmt.Errorf("missing timestamp header")
 	}
@@ -133,7 +133,7 @@ func (v *validator) Validate(r *http.Request, secret string) (bool, error) {
 }
 
 func (v *validator) GetKeyId(r *http.Request) string {
-	return r.Header.Get("x-api-key-id")
+	return r.Header.Get(apiKeyIdHeader)
 }
 
 // NewValidator creates a new Validator instance for validating HTTP requests.
