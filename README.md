@@ -8,6 +8,7 @@ A Go package for secure HMAC-SHA256-based authentication and validation of HTTP 
 - **HTTP Request Signing:** Attach authentication headers (`x-signature`, `x-api-key-id`, `x-timestamp`) to HTTP requests.
 - **Request Validation:** Validate signed HTTP requests, including signature and timestamp checks.
 - **Configurable Validity Window:** Control how long a signed request remains valid.
+- **Secure HTTP Client:** Use the `client` package to automatically sign and send authenticated HTTP requests.
 
 ## Usage
 
@@ -16,7 +17,7 @@ A Go package for secure HMAC-SHA256-based authentication and validation of HTTP 
 ```go
 import (
     "fmt"
-    "yourmodule/hash"
+    "github.com/go-core-stack/auth/hash"
 )
 
 func main() {
@@ -32,7 +33,7 @@ func main() {
 ```go
 import (
     "net/http"
-    "yourmodule/hash"
+    "github.com/go-core-stack/auth/hash"
 )
 
 func main() {
@@ -48,7 +49,7 @@ func main() {
 ```go
 import (
     "net/http"
-    "yourmodule/hash"
+    "github.com/go-core-stack/auth/hash"
     "fmt"
 )
 
@@ -61,6 +62,29 @@ func main() {
         return
     }
     fmt.Println("Request is valid!")
+}
+```
+
+### 4. Use the Secure HTTP Client
+
+```go
+import (
+    "github.com/go-core-stack/auth/client"
+    "net/http"
+)
+
+func main() {
+    cli, err := client.NewClient("https://api.example.com", "api-key-id", "supersecret", false)
+    if err != nil {
+        panic(err)
+    }
+    req, _ := http.NewRequest("GET", "/resource", nil)
+    resp, err := cli.Do(req)
+    if err != nil {
+        panic(err)
+    }
+    defer resp.Body.Close()
+    // Handle response...
 }
 ```
 
@@ -85,6 +109,14 @@ func main() {
 ### `NewValidator(validity int64) Validator`
 
 - Returns a Validator for validating HTTP requests. `validity` is the allowed time window (in seconds).
+
+### `client.Client` interface
+
+- `Do(*http.Request) (*http.Response, error)`: Sends a signed HTTP request.
+
+### `client.NewClient(endpoint, apiKey, secret string, allowInsecure bool) (Client, error)`
+
+- Returns a secure HTTP client that signs all requests. Set `allowInsecure` to `true` to disable TLS verification (for testing only).
 
 ## Testing
 
