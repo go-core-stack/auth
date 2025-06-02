@@ -1,0 +1,6 @@
+github.com/go-core-stack/core v0.0.0-20250602095754-4e9ba9991c48 h1:Zx6wayr1O3+SEsj1FVbFSwhquFwj9lVwcnfg4WBrKHQ=
+github.com/go-core-stack/core v0.0.0-20250602095754-4e9ba9991c48/go.mod h1:x2FDn7vxfDMb/V4PIJ8Fr1+nz8yMkBPZgF/16cSZVS0=
+golang.org/x/sys v0.30.0 h1:QjkSwP/36a20jFYWkSue1YwXzLmsV5Gfq7Eiy72C1uc=
+golang.org/x/sys v0.30.0/go.mod h1:/VUhepiaJMQUp4+oa/7Zr1D23ma6VTLIYjOOTFZPUcA=
+google.golang.org/grpc v1.72.2 h1:TdbGzwb82ty4OusHWepvFWGLgIbNo1/SUynEN0ssqv8=
+google.golang.org/grpc v1.72.2/go.mod h1:wH5Aktxcg25y1I3w7H69nHfXdOG3UiadoBtjh3izSDM=
