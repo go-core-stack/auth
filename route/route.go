@@ -41,7 +41,7 @@ type RouteTable struct {
 
 var routeTable *RouteTable
 
-func GetTenantTable() (*RouteTable, error) {
+func GetRouteTable() (*RouteTable, error) {
 	if routeTable != nil {
 		return routeTable, nil
 	}
@@ -49,7 +49,7 @@ func GetTenantTable() (*RouteTable, error) {
 	return nil, errors.Wrapf(errors.NotFound, "route table not found")
 }
 
-func LocateTenantTable(client db.StoreClient) (*RouteTable, error) {
+func LocateRouteTable(client db.StoreClient) (*RouteTable, error) {
 	if routeTable != nil {
 		return routeTable, nil
 	}
