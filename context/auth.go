@@ -19,14 +19,15 @@ import (
 // the inforamtion internally in the system between the microservices
 // we can validate entities like user, devices, service accounts etc
 type AuthInfo struct {
-	Realm         string `json:"realm,omitempty"`
-	UserName      string `json:"preferred_username"`
-	Email         string `json:"email,omitempty"`
-	EmailVerified bool   `json:"email_verified,omitempty"`
-	FullName      string `json:"name,omitempty"`
-	FirstName     string `json:"given_name,omitempty"`
-	LastName      string `json:"family_name,omitempty"`
-	SessionID     string `json:"sid,omitempty"`
+	Realm         string   `json:"realm,omitempty"`
+	UserName      string   `json:"preferred_username"`
+	Email         string   `json:"email,omitempty"`
+	EmailVerified bool     `json:"email_verified,omitempty"`
+	FullName      string   `json:"name,omitempty"`
+	FirstName     string   `json:"given_name,omitempty"`
+	LastName      string   `json:"family_name,omitempty"`
+	SessionID     string   `json:"sid,omitempty"`
+	Roles         []string `json:"roles,omitempty"`
 }
 
 // struct identifier for the context
