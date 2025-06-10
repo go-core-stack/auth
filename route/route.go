@@ -31,7 +31,18 @@ type Key struct {
 type Route struct {
 	Key      *Key   `json:"key,omitempty"`
 	Endpoint string `json:"endpoint,omitempty"`
-	IsPublic *bool  `json:"isPublic,omitempty"`
+
+	// If the route is publically accessible, then rest of the fields
+	// below are not relevant
+	IsPublic *bool `json:"isPublic,omitempty"`
+
+	// if route is user specific RBAC constructs are not valid, rest of
+	// the fields below are not relevant
+	IsUserSpecific *bool `json:"isUserSpecific,omitempty"`
+
+	// RBAC constructs associated with Route
+	ResourceName string `json:"resourceName,omitempty"`
+	Verb         string `json:"verb,omitempty"`
 }
 
 type RouteTable struct {
