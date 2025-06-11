@@ -24,25 +24,28 @@ const (
 )
 
 type Key struct {
-	Url    string     `json:"url,omitempty"`
-	Method MethodType `json:"method,omitempty"`
+	Url    string     `bson:"url,omitempty"`
+	Method MethodType `bson:"method,omitempty"`
 }
 
 type Route struct {
-	Key      *Key   `json:"key,omitempty"`
-	Endpoint string `json:"endpoint,omitempty"`
+	Key      *Key   `bson:"key,omitempty"`
+	Endpoint string `bson:"endpoint,omitempty"`
 
 	// If the route is publically accessible, then rest of the fields
 	// below are not relevant
-	IsPublic *bool `json:"isPublic,omitempty"`
+	IsPublic *bool `bson:"isPublic,omitempty"`
+
+	// Route is supposed to be accessible only for root tenancy
+	IsRoot *bool `bson:"isRoot,omitempty"`
 
 	// if route is user specific RBAC constructs are not valid, rest of
 	// the fields below are not relevant
-	IsUserSpecific *bool `json:"isUserSpecific,omitempty"`
+	IsUserSpecific *bool `bson:"isUserSpecific,omitempty"`
 
 	// RBAC constructs associated with Route
-	ResourceName string `json:"resourceName,omitempty"`
-	Verb         string `json:"verb,omitempty"`
+	ResourceName string `bson:"resourceName,omitempty"`
+	Verb         string `bson:"verb,omitempty"`
 }
 
 type RouteTable struct {
