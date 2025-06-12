@@ -44,8 +44,8 @@ type Route struct {
 	IsUserSpecific *bool `bson:"isUserSpecific,omitempty"`
 
 	// RBAC constructs associated with Route
-	ResourceName string `bson:"resourceName,omitempty"`
-	Verb         string `bson:"verb,omitempty"`
+	Resource string `bson:"resource,omitempty"`
+	Verb     string `bson:"verb,omitempty"`
 }
 
 type RouteTable struct {
