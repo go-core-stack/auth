@@ -12,8 +12,11 @@ import (
 // Route represents an HTTP route with a URL and HTTP method.
 // The Method field uses the custom MethodType defined in the route package.
 type Route struct {
-	Url    string           // The URL path for the route (e.g., "/api/v1/resource")
-	Method route.MethodType // The HTTP method for the route (e.g., route.GET, route.POST)
+	Url      string           // The URL path for the route (e.g., "/api/v1/resource")
+	Method   route.MethodType // The HTTP method for the route (e.g., route.GET, route.POST)
+	Resource string           // name of the resource represented by route
+	Verb     string           // Action of verb corresponding to this API
+	Scopes   []string         // Scope for the resource, with top level scope being first in the list and so on, empty slice indicates no scope or tenant level access
 }
 
 // NewRoute creates a new Route instance from a URL and HTTP method string.
