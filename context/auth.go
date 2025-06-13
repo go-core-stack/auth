@@ -28,6 +28,7 @@ type AuthInfo struct {
 	LastName      string   `json:"family_name,omitempty"`
 	SessionID     string   `json:"sid,omitempty"`
 	Roles         []string `json:"roles,omitempty"`
+	IsRoot        bool     `json:"isRoot,omitempty"`
 }
 
 // struct identifier for the context
