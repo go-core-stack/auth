@@ -46,6 +46,13 @@ type Route struct {
 	// RBAC constructs associated with Route
 	Resource string `bson:"resource,omitempty"`
 	Verb     string `bson:"verb,omitempty"`
+
+	// if this is a scoped route, this array would be non empty
+	// well at the moment, only a single scope will be enabled
+	// that too will be only organisation unit.
+	// if first scope is not ou, then it is assumed to be
+	// equivalent to be empty and hence not scoped
+	Scopes []string `bson:"scopes,omitempty"`
 }
 
 type RouteTable struct {
