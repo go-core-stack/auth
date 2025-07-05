@@ -11,4 +11,7 @@ const (
 const (
 	// Routes collection name
 	RoutesCollectionName = "routes"
+
+	// RouteProviders Collection name
+	RouteProvidersCollectionName = "route-providers"
 )

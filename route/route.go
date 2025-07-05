@@ -4,8 +4,12 @@
 package route
 
 import (
+	"context"
+	"log"
+
 	"github.com/go-core-stack/core/db"
 	"github.com/go-core-stack/core/errors"
+	"github.com/go-core-stack/core/sync"
 	"github.com/go-core-stack/core/table"
 )
 
@@ -57,7 +61,41 @@ type Route struct {
 
 type RouteTable struct {
 	table.Table[Key, Route]
-	col db.StoreCollection
+	col    db.StoreCollection
+	pTable *sync.ProviderTable
+}
+
+func (t *RouteTable) Insert(ctx context.Context, entry *Route) error {
+	err := t.Table.Insert(ctx, entry.Key, entry)
+	if err != nil {
+		return err
+	}
+	_, err = t.pTable.CreateProvider(ctx, *entry.Key)
+	return err
+}
+
+func (t *RouteTable) Locate(ctx context.Context, entry *Route) error {
+	err := t.Table.Locate(ctx, entry.Key, entry)
+	if err != nil {
+		return err
+	}
+	_, err = t.pTable.CreateProvider(ctx, *entry.Key)
+	if err != nil && !errors.IsAlreadyExists(err) {
+		return err
+	}
+	return nil
+}
+
+func (t *RouteTable) Find(ctx context.Context, key *Key) (*Route, error) {
+	entry, err := t.Table.Find(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	ok := t.pTable.IsProviderAvailable(*key)
+	if !ok {
+		return nil, errors.Wrapf(errors.NotFound, "route not found for key: %v", key)
+	}
+	return entry, nil
 }
 
 var routeTable *RouteTable
@@ -75,12 +113,20 @@ func LocateRouteTable(client db.StoreClient) (*RouteTable, error) {
 		return routeTable, nil
 	}
 
-	col := client.GetCollection(ServicesDatabaseName, RoutesCollectionName)
-	tbl := &RouteTable{
-		col: col,
+	store := client.GetDataStore(ServicesDatabaseName)
+
+	pTable, err := sync.LocateProviderTableWithName(store, RouteProvidersCollectionName)
+	if err != nil {
+		log.Panicf("failed to locate route provider table: %s", err)
 	}
 
-	err := tbl.Initialize(col)
+	col := store.GetCollection(RoutesCollectionName)
+	tbl := &RouteTable{
+		col:    col,
+		pTable: pTable,
+	}
+
+	err = tbl.Initialize(col)
 	if err != nil {
 		return nil, err
 	}
