@@ -44,6 +44,7 @@ type Route struct {
 	IsUserSpecific *bool `bson:"isUserSpecific,omitempty"`
 
 	// RBAC constructs associated with Route
+	Group    string `bson:"group,omitempty"`
 	Resource string `bson:"resource,omitempty"`
 	Verb     string `bson:"verb,omitempty"`
 
