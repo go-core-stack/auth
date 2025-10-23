@@ -86,7 +86,7 @@ func (c *client) Do(req *http.Request) (*http.Response, error) {
 	// Ensure the request uses the configured endpoint, not what the caller set.
 	req.URL.Scheme = c.url.Scheme
 	req.URL.Host = c.url.Host
-	req.URL.Path = c.url.Path
+	//req.URL.Path = c.url.Path
 
 	// Add authentication headers and send the request.
 	return c.hClient.Do(c.hGenerator.AddAuthHeaders(req))
