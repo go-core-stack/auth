@@ -108,6 +108,13 @@ func ProcessAuthInfo(ctx context.Context) (context.Context, error) {
 	return authCtx, nil
 }
 
+// ContextWithAuthInfo returns a new context with the provided AuthInfo attached
+func ContextWithAuthInfo(ctx context.Context, info *AuthInfo) context.Context {
+	// create new context with value of the auth info
+	authCtx := context.WithValue(ctx, authInfo{}, info)
+	return authCtx
+}
+
 // gets Auth Info from Context available in the Http Request
 func GetAuthInfoFromContext(ctx context.Context) (*AuthInfo, error) {
 	val := ctx.Value(authInfo{})
