@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/go-core-stack/core/db"
-	"github.com/go-core-stack/core/reconciler"
 	coresync "github.com/go-core-stack/core/sync"
 	"github.com/go-core-stack/core/table"
 	"github.com/go-core-stack/core/utils"
@@ -142,7 +141,6 @@ type OAuthConfig struct {
 	Scopes       []string     // default scopes
 	ClientName   string       // for dynamic registration metadata
 	EncryptorKey string       // optional, falls back to ENCRYPTOR_KEY env
-	DBName       string       // optional, defaults to "auth-library"
 	HTTPClient   *http.Client // optional, defaults to 30s-timeout client
 }
 
@@ -200,6 +198,6 @@ type OAuthManager struct {
 
 	encryptor utils.IOEncryptor //nolint:unused // wired in AUTH-0003 (NewOAuthManager)
 
-	pendingReconciler *reconciler.Pipeline //nolint:unused // wired in AUTH-0003
-	tokenReconciler   *reconciler.Pipeline //nolint:unused // wired in AUTH-0003
+	pendingReconciler *pendingStateReconciler // wired in AUTH-0003 (NewOAuthManager)
+	tokenReconciler   *tokenRefreshReconciler // wired in AUTH-0003 (NewOAuthManager)
 }

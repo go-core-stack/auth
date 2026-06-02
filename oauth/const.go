@@ -6,11 +6,7 @@ package oauth
 import "time"
 
 const (
-	// DefaultDBName is the default database name for the OAuth client
-	// library storage. Overridable via OAuthConfig.DBName.
-	DefaultDBName = "auth-library"
-
-	// Collection names within the OAuth library database.
+	// Collection names within the database the consumer supplies via db.Store.
 	ServersCollection           = "servers"
 	ClientsCollection           = "clients"
 	TokensCollection            = "tokens"
