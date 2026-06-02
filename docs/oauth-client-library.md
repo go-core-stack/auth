@@ -65,15 +65,17 @@ auth/
 
 ### 3.1 Database & Collections
 
-| Database       | Collection            | Key                       | Purpose                                            |
-|----------------|-----------------------|---------------------------|----------------------------------------------------|
-| `auth-library` | `servers`             | `ServerURL` (string)      | Cached discovery metadata per remote server        |
-| `auth-library` | `clients`             | `ServerURL` (string)      | Registered OAuth client per remote server          |
-| `auth-library` | `tokens`              | `{ServerURL, AccountID}`  | OAuth tokens per (server × account) pair           |
-| `auth-library` | `pending_auth_states` | `State` (string)          | Transient PKCE/CSRF state for in-flight flows      |
+| Collection            | Key                       | Purpose                                            |
+|-----------------------|---------------------------|----------------------------------------------------|
+| `servers`             | `ServerURL` (string)      | Cached discovery metadata per remote server        |
+| `clients`             | `ServerURL` (string)      | Registered OAuth client per remote server          |
+| `tokens`              | `{ServerURL, AccountID}`  | OAuth tokens per (server × account) pair           |
+| `pending_auth_states` | `State` (string)          | Transient PKCE/CSRF state for in-flight flows      |
 
-Database name (`auth-library`) is the default, overridable via
-`OAuthConfig.DBName`. The `pending_auth_states` collection uses a MongoDB TTL
+These collections live in the `db.Store` the consumer supplies to
+`NewOAuthManager` — the consuming service owns the connection and chooses the
+backing database (resolving it via its own `db.StoreClient.GetDataStore`). The
+`pending_auth_states` collection uses a MongoDB TTL
 index on `createdAt` (10-minute expiry) configured via `IndexDefinition.TTL` in
 `core/db.EnsureIndexes`. Entries are also deleted explicitly on successful use
 in `HandleCallback`, and actively cleaned by the stale-state reconciler (§6.1).
@@ -210,11 +212,10 @@ type OAuthConfig struct {
     Scopes       []string     // default scopes
     ClientName   string       // for dynamic registration metadata
     EncryptorKey string       // optional, falls back to ENCRYPTOR_KEY env
-    DBName       string       // optional, defaults to "auth-library"
     HTTPClient   *http.Client // optional, defaults to 30s-timeout client
 }
 
-func NewOAuthManager(ctx context.Context, db *db.Store, cfg OAuthConfig) (*OAuthManager, error)
+func NewOAuthManager(ctx context.Context, store db.Store, cfg OAuthConfig) (*OAuthManager, error)
 ```
 
 `NewOAuthManager` is the single init point: initialize 4 Tables + 2 LockTables,

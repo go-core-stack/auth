@@ -21,6 +21,6 @@ require (
 )
 
 require (
-	github.com/go-core-stack/core v0.0.1
+	github.com/go-core-stack/core v0.0.2-0.20260407104743-122c27652beb
 	golang.org/x/sys v0.33.0 // indirect
 )
