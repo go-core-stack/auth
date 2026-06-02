@@ -155,8 +155,6 @@ func (m *OAuthManager) initManagerEncryptor(cfg OAuthConfig) (utils.IOEncryptor,
 // the single chokepoint for outbound HTTP so timeout/retry policy can evolve in
 // one place; discovery, registration, and token exchange (AUTH-0004..0007) use
 // it.
-//
-//nolint:unused // consumed by AUTH-0004..0007
 func (m *OAuthManager) httpDo(req *http.Request) (*http.Response, error) {
 	return m.httpClient.Do(req)
 }
