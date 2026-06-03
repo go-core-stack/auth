@@ -248,7 +248,7 @@ func refreshTokenExchange(ctx context.Context, do httpDoFunc, servers serverCach
 			"oauth: server %s has no usable token endpoint", key.ServerURL)
 	}
 
-	client, err := findClient(ctx, clients, key.ServerURL)
+	client, err := findClient(ctx, clients, key.ServerURL, key.ClientRef)
 	if err != nil {
 		return nil, err
 	}
@@ -379,7 +379,7 @@ func revokeAtServer(ctx context.Context, do httpDoFunc, servers serverCache, cli
 	form.Set("token", token)
 	form.Set("token_type_hint", hint)
 
-	client, err := findClient(ctx, clients, key.ServerURL)
+	client, err := findClient(ctx, clients, key.ServerURL, key.ClientRef)
 	if err != nil {
 		return err
 	}

@@ -26,6 +26,7 @@ type fakeClientStore struct {
 	entries   map[string]*ClientEntry
 	findCalls int
 	inserts   int
+	locates   int
 	deletes   int
 	onFind    func(call int)
 }
@@ -34,12 +35,22 @@ func newFakeClientStore() *fakeClientStore {
 	return &fakeClientStore{entries: map[string]*ClientEntry{}}
 }
 
+// ckey is the map key the fake uses to model the composite (ServerURL,
+// ClientRef) primary key. An empty ClientRef (the dynamic slot) maps to the bare
+// ServerURL so existing dynamic-only tests keep indexing entries by URL.
+func ckey(serverURL, clientRef string) string {
+	if clientRef == "" {
+		return serverURL
+	}
+	return serverURL + "\x00" + clientRef
+}
+
 func (c *fakeClientStore) Find(_ context.Context, key *ClientKey) (*ClientEntry, error) {
 	c.findCalls++
 	if c.onFind != nil {
 		c.onFind(c.findCalls)
 	}
-	e, ok := c.entries[key.ServerURL]
+	e, ok := c.entries[ckey(key.ServerURL, key.ClientRef)]
 	if !ok {
 		return nil, errors.Wrapf(errors.NotFound, "no client for %s", key.ServerURL)
 	}
@@ -48,19 +59,27 @@ func (c *fakeClientStore) Find(_ context.Context, key *ClientKey) (*ClientEntry,
 
 func (c *fakeClientStore) Insert(_ context.Context, key *ClientKey, entry *ClientEntry) error {
 	c.inserts++
-	if _, ok := c.entries[key.ServerURL]; ok {
+	k := ckey(key.ServerURL, key.ClientRef)
+	if _, ok := c.entries[k]; ok {
 		return errors.Wrapf(errors.AlreadyExists, "client already exists for %s", key.ServerURL)
 	}
-	c.entries[key.ServerURL] = entry
+	c.entries[k] = entry
+	return nil
+}
+
+func (c *fakeClientStore) Locate(_ context.Context, key *ClientKey, entry *ClientEntry) error {
+	c.locates++
+	c.entries[ckey(key.ServerURL, key.ClientRef)] = entry
 	return nil
 }
 
 func (c *fakeClientStore) DeleteKey(_ context.Context, key *ClientKey) error {
 	c.deletes++
-	if _, ok := c.entries[key.ServerURL]; !ok {
+	k := ckey(key.ServerURL, key.ClientRef)
+	if _, ok := c.entries[k]; !ok {
 		return errors.Wrapf(errors.NotFound, "no client for %s", key.ServerURL)
 	}
-	delete(c.entries, key.ServerURL)
+	delete(c.entries, k)
 	return nil
 }
 
@@ -103,6 +122,10 @@ func (s *lockObservingStore) Find(ctx context.Context, key *ClientKey) (*ClientE
 
 func (s *lockObservingStore) Insert(ctx context.Context, key *ClientKey, entry *ClientEntry) error {
 	return s.store.Insert(ctx, key, entry)
+}
+
+func (s *lockObservingStore) Locate(ctx context.Context, key *ClientKey, entry *ClientEntry) error {
+	return s.store.Locate(ctx, key, entry)
 }
 
 func (s *lockObservingStore) DeleteKey(ctx context.Context, key *ClientKey) error {
@@ -502,7 +525,7 @@ func TestReRegisterClient_LockContentionFailsRetryable(t *testing.T) {
 func TestGetClient_HitAndMiss(t *testing.T) {
 	clients := newFakeClientStore()
 
-	got, err := getClient(context.Background(), clients, "https://api.example.com/")
+	got, err := getClient(context.Background(), clients, "https://api.example.com/", "")
 	if err != nil {
 		t.Fatalf("unexpected error on miss: %v", err)
 	}
@@ -511,7 +534,7 @@ func TestGetClient_HitAndMiss(t *testing.T) {
 	}
 
 	clients.entries["https://api.example.com"] = &ClientEntry{ClientID: "client-abc"}
-	got, err = getClient(context.Background(), clients, "https://api.example.com")
+	got, err = getClient(context.Background(), clients, "https://api.example.com", "")
 	if err != nil {
 		t.Fatalf("unexpected error on hit: %v", err)
 	}
@@ -520,14 +543,164 @@ func TestGetClient_HitAndMiss(t *testing.T) {
 	}
 }
 
-func TestRegisterStaticClient_Unimplemented(t *testing.T) {
-	m := &OAuthManager{}
-	err := m.RegisterStaticClient(context.Background(), "https://api.example.com", ClientEntry{})
-	if err == nil {
-		t.Fatal("expected an error from the static-registration stub")
+// GetClient must resolve by (serverURL, clientRef): looking up a clientRef that
+// was never stored is a miss even when another clientRef exists for the server.
+func TestGetClient_DistinguishesByClientRef(t *testing.T) {
+	clients := newFakeClientStore()
+	clients.entries[ckey("https://api.example.com", "tenant-a")] = &ClientEntry{ClientID: "client-a"}
+
+	got, err := getClient(context.Background(), clients, "https://api.example.com", "tenant-a")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if !errors.Is(err, errStaticRegistrationUnimplemented) {
-		t.Errorf("expected errStaticRegistrationUnimplemented, got %v", err)
+	if got == nil || got.ClientID != "client-a" {
+		t.Errorf("expected tenant-a client, got %v", got)
+	}
+
+	got, err = getClient(context.Background(), clients, "https://api.example.com", "tenant-b")
+	if err != nil {
+		t.Fatalf("unexpected error on miss: %v", err)
+	}
+	if got != nil {
+		t.Errorf("expected miss for unregistered clientRef, got %v", got)
+	}
+}
+
+// Static registration must reject an empty clientRef: "" is reserved for the
+// dynamic client slot.
+func TestRegisterStaticClient_EmptyClientRefRejected(t *testing.T) {
+	clients := newFakeClientStore()
+
+	err := registerStaticClient(context.Background(), clients, "https://api.example.com", "", ClientEntry{ClientID: "x"})
+	if err == nil {
+		t.Fatal("expected an error when clientRef is empty")
+	}
+	if !errors.IsInvalidArgument(err) {
+		t.Errorf("expected InvalidArgument, got %v", err)
+	}
+	if clients.locates != 0 || clients.inserts != 0 {
+		t.Errorf("must not persist on rejection; locates=%d inserts=%d", clients.locates, clients.inserts)
+	}
+}
+
+// Static registration must reject a server URL that normalizes to empty (e.g.
+// whitespace-only): a non-empty clientRef alone is not enough to provision.
+func TestRegisterStaticClient_EmptyServerURLRejected(t *testing.T) {
+	clients := newFakeClientStore()
+
+	err := registerStaticClient(context.Background(), clients, "   ", "tenant-a", ClientEntry{ClientID: "x"})
+	if err == nil {
+		t.Fatal("expected an error when serverURL normalizes to empty")
+	}
+	if !errors.IsInvalidArgument(err) {
+		t.Errorf("expected InvalidArgument, got %v", err)
+	}
+	if clients.locates != 0 || clients.inserts != 0 {
+		t.Errorf("must not persist on rejection; locates=%d inserts=%d", clients.locates, clients.inserts)
+	}
+}
+
+// A successful static registration normalizes the server URL, stamps static
+// metadata, and upserts the consumer-supplied entry under (ServerURL, ClientRef).
+func TestRegisterStaticClient_SetsMetadataAndUpserts(t *testing.T) {
+	clients := newFakeClientStore()
+
+	// trailing slash exercises normalization on the write path
+	err := registerStaticClient(context.Background(), clients, "https://api.example.com/", "tenant-a",
+		ClientEntry{ClientID: "static-id", ClientSecret: "shh", ClientType: "confidential"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	stored := clients.entries[ckey("https://api.example.com", "tenant-a")]
+	if stored == nil {
+		t.Fatalf("client not persisted under normalized (server, clientRef) key; keys=%v", clients.entries)
+	}
+	if stored.RegistrationType != registrationTypeStatic {
+		t.Errorf("registration type = %q, want %q", stored.RegistrationType, registrationTypeStatic)
+	}
+	if stored.RegisteredAt == 0 {
+		t.Error("RegisteredAt should be set")
+	}
+	if stored.ClientType != "confidential" {
+		t.Errorf("ClientType = %q, want consumer-supplied %q", stored.ClientType, "confidential")
+	}
+	if stored.ClientID != "static-id" || stored.ClientSecret != "shh" {
+		t.Errorf("consumer-supplied credentials not preserved: %+v", stored)
+	}
+
+	// Locate is an upsert: re-registering the same ref must not error.
+	if err := registerStaticClient(context.Background(), clients, "https://api.example.com", "tenant-a",
+		ClientEntry{ClientID: "rotated", ClientSecret: "shh2", ClientType: "confidential"}); err != nil {
+		t.Fatalf("re-provisioning a static client must succeed: %v", err)
+	}
+	if got := clients.entries[ckey("https://api.example.com", "tenant-a")]; got == nil || got.ClientID != "rotated" {
+		t.Errorf("re-provision did not replace the entry; got %v", got)
+	}
+}
+
+// Two static clients for the SAME server with different clientRefs must coexist
+// independently — neither overwrites the other.
+func TestRegisterStaticClient_TwoTenantsSameServer(t *testing.T) {
+	clients := newFakeClientStore()
+	const server = "https://api.example.com"
+
+	if err := registerStaticClient(context.Background(), clients, server, "tenant-a",
+		ClientEntry{ClientID: "id-a", ClientType: "confidential"}); err != nil {
+		t.Fatalf("tenant-a registration failed: %v", err)
+	}
+	if err := registerStaticClient(context.Background(), clients, server, "tenant-b",
+		ClientEntry{ClientID: "id-b", ClientType: "confidential"}); err != nil {
+		t.Fatalf("tenant-b registration failed: %v", err)
+	}
+
+	a, err := getClient(context.Background(), clients, server, "tenant-a")
+	if err != nil || a == nil || a.ClientID != "id-a" {
+		t.Errorf("tenant-a lookup = %v, err=%v; want id-a", a, err)
+	}
+	b, err := getClient(context.Background(), clients, server, "tenant-b")
+	if err != nil || b == nil || b.ClientID != "id-b" {
+		t.Errorf("tenant-b lookup = %v, err=%v; want id-b", b, err)
+	}
+}
+
+// A static client (clientRef "tenant-a") and a dynamic client (clientRef "")
+// for the same server must not interfere with each other.
+func TestRegisterStaticClient_CoexistsWithDynamic(t *testing.T) {
+	locks := &fakeRegistrationLocks{}
+	clients := newFakeClientStore()
+	do := func(_ *http.Request) (*http.Response, error) {
+		return jsonResponse(regResp), nil
+	}
+	const server = "https://api.example.com"
+
+	// Dynamic client occupies the "" slot.
+	dyn, err := registerDynamicClient(context.Background(), do, clients, locks,
+		staticDiscover(discoveredServer()), testConfig(),
+		RegisterClientOptions{ServerURL: server})
+	if err != nil {
+		t.Fatalf("dynamic registration failed: %v", err)
+	}
+
+	// Static client for the same server under a distinct clientRef.
+	if err := registerStaticClient(context.Background(), clients, server, "tenant-a",
+		ClientEntry{ClientID: "static-id", ClientType: "confidential"}); err != nil {
+		t.Fatalf("static registration failed: %v", err)
+	}
+
+	gotDyn, err := getClient(context.Background(), clients, server, "")
+	if err != nil || gotDyn == nil || gotDyn.ClientID != dyn.ClientID {
+		t.Errorf("dynamic client clobbered: got %v err=%v, want %q", gotDyn, err, dyn.ClientID)
+	}
+	if gotDyn.RegistrationType != registrationTypeDynamic {
+		t.Errorf("dynamic slot type = %q, want %q", gotDyn.RegistrationType, registrationTypeDynamic)
+	}
+	gotStatic, err := getClient(context.Background(), clients, server, "tenant-a")
+	if err != nil || gotStatic == nil || gotStatic.ClientID != "static-id" {
+		t.Errorf("static client lookup = %v err=%v, want static-id", gotStatic, err)
+	}
+	if gotStatic.RegistrationType != registrationTypeStatic {
+		t.Errorf("static slot type = %q, want %q", gotStatic.RegistrationType, registrationTypeStatic)
 	}
 }
 
