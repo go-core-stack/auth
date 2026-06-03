@@ -113,6 +113,7 @@ type PendingAuthStateKey struct {
 type PendingAuthState struct {
 	ServerURL    string    `bson:"serverUrl"`
 	AccountID    string    `bson:"accountId"`
+	ClientID     string    `bson:"clientId"`     // client that initiated the flow
 	CodeVerifier string    `bson:"codeVerifier"` // encrypted at rest
 	RedirectURI  string    `bson:"redirectUri"`
 	Scopes       []string  `bson:"scopes,omitempty"`
