@@ -58,6 +58,11 @@ type ServerEntry struct {
 // ClientKey keys a registered OAuth client by remote server URL.
 type ClientKey struct {
 	ServerURL string `bson:"serverUrl"`
+	// ClientRef is a consumer-defined opaque label disambiguating multiple
+	// clients registered against the same authorization server (multi-tenant
+	// static clients). It is NOT the OAuth-protocol ClientID (see
+	// ClientEntry.ClientID); dynamic registration uses ClientRef "".
+	ClientRef string `bson:"clientRef,omitempty"`
 }
 
 // ClientEntry holds a registered OAuth client for a remote server. Sensitive
@@ -81,6 +86,11 @@ type ClientEntry struct {
 // TokenKey keys a token by (server, account) pair.
 type TokenKey struct {
 	ServerURL string `bson:"serverUrl"`
+	// ClientRef is a consumer-defined opaque label disambiguating multiple
+	// clients registered against the same authorization server. It is NOT the
+	// OAuth-protocol ClientID (see ClientEntry.ClientID); dynamic registration
+	// uses ClientRef "".
+	ClientRef string `bson:"clientRef,omitempty"`
 	AccountID string `bson:"accountId"`
 }
 
@@ -111,7 +121,13 @@ type PendingAuthStateKey struct {
 // authorization flow. CodeVerifier is encrypted at rest via the custom BSON
 // marshalers in encryption.go.
 type PendingAuthState struct {
-	ServerURL    string    `bson:"serverUrl"`
+	ServerURL string `bson:"serverUrl"`
+	// ClientRef is a consumer-defined opaque label disambiguating multiple
+	// clients registered against the same authorization server, so
+	// HandleCallback can rebuild the correct TokenKey. It is NOT the
+	// OAuth-protocol ClientID (see ClientID below); dynamic registration uses
+	// ClientRef "".
+	ClientRef    string    `bson:"clientRef,omitempty"`
 	AccountID    string    `bson:"accountId"`
 	ClientID     string    `bson:"clientId"`     // client that initiated the flow
 	CodeVerifier string    `bson:"codeVerifier"` // encrypted at rest
@@ -125,11 +141,21 @@ type PendingAuthState struct {
 // RegistrationLockKey serializes dynamic registration per remote server.
 type RegistrationLockKey struct {
 	ServerURL string `bson:"serverUrl"`
+	// ClientRef is a consumer-defined opaque label disambiguating multiple
+	// clients registered against the same authorization server. It is NOT the
+	// OAuth-protocol ClientID (see ClientEntry.ClientID); dynamic registration
+	// uses ClientRef "".
+	ClientRef string `bson:"clientRef,omitempty"`
 }
 
 // TokenRefreshLockKey serializes token refresh per (server, account) pair.
 type TokenRefreshLockKey struct {
 	ServerURL string `bson:"serverUrl"`
+	// ClientRef is a consumer-defined opaque label disambiguating multiple
+	// clients registered against the same authorization server. It is NOT the
+	// OAuth-protocol ClientID (see ClientEntry.ClientID); dynamic registration
+	// uses ClientRef "".
+	ClientRef string `bson:"clientRef,omitempty"`
 	AccountID string `bson:"accountId"`
 }
 
@@ -147,7 +173,11 @@ type OAuthConfig struct {
 
 // RegisterClientOptions parameterizes dynamic client registration.
 type RegisterClientOptions struct {
-	ServerURL    string
+	ServerURL string
+	// ClientRef is a consumer-defined opaque label disambiguating multiple
+	// clients registered against the same authorization server. It is NOT the
+	// OAuth-protocol ClientID; dynamic registration uses ClientRef "".
+	ClientRef    string
 	ClientName   string   // defaults to OAuthConfig.ClientName
 	RedirectURIs []string // defaults to []string{OAuthConfig.RedirectURI}
 	Scopes       []string // defaults to OAuthConfig.Scopes
@@ -156,7 +186,11 @@ type RegisterClientOptions struct {
 
 // AuthorizeOptions parameterizes generation of an authorization request.
 type AuthorizeOptions struct {
-	ServerURL   string
+	ServerURL string
+	// ClientRef is a consumer-defined opaque label disambiguating multiple
+	// clients registered against the same authorization server. It is NOT the
+	// OAuth-protocol ClientID; dynamic registration uses ClientRef "".
+	ClientRef   string
 	AccountID   string            // consumer's opaque identifier — never sent to server
 	RedirectURI string            // defaults to OAuthConfig.RedirectURI
 	Scopes      []string          // defaults to OAuthConfig.Scopes
