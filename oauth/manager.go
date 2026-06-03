@@ -61,13 +61,7 @@ func NewOAuthManager(ctx context.Context, store db.Store, cfg OAuthConfig) (*OAu
 	//    starts the background change-stream watchers (which it has no API to
 	//    unwind), shrinking the partially-initialized-watcher window.
 	pendingCol := store.GetCollection(PendingAuthStatesCollection)
-	if err := pendingCol.EnsureIndexes(ctx, []db.IndexDefinition{
-		{
-			Name:   "pending-auth-state-ttl",
-			Fields: []db.IndexField{{Field: "createdAt", IndexType: db.IndexAscending}},
-			TTL:    PendingStateTTL,
-		},
-	}); err != nil {
+	if err := pendingCol.EnsureIndexes(ctx, pendingStateTTLIndexes()); err != nil {
 		return nil, errors.Wrapf(errors.GetErrCode(err), "oauth: failed to ensure pending-auth-state TTL index: %s", err)
 	}
 
@@ -120,6 +114,22 @@ func NewOAuthManager(ctx context.Context, store db.Store, cfg OAuthConfig) (*OAu
 	}
 
 	return m, nil
+}
+
+// pendingStateTTLIndexes returns the index definitions ensured on the
+// pending_auth_states collection during initialization: a single TTL index on
+// the createdAt field that expires a pending authorization state
+// PendingStateTTL after it is created. It is a package helper (rather than an
+// inline literal) so the TTL configuration is unit-testable without a live
+// collection; NewOAuthManager ensures exactly these indexes.
+func pendingStateTTLIndexes() []db.IndexDefinition {
+	return []db.IndexDefinition{
+		{
+			Name:   "pending-auth-state-ttl",
+			Fields: []db.IndexField{{Field: "createdAt", IndexType: db.IndexAscending}},
+			TTL:    PendingStateTTL,
+		},
+	}
 }
 
 // initManagerEncryptor resolves the field-encryption key with precedence

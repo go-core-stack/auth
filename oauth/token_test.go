@@ -64,6 +64,14 @@ func (f *fakeTokenStore) DeleteKey(_ context.Context, key *TokenKey) error {
 	return nil
 }
 
+// Locate upserts an entry, satisfying the tokenWriter interface the callback
+// handler uses. With it, one fakeTokenStore backs both the callback (which
+// persists the freshly exchanged token) and the lifecycle API (GetToken /
+// RefreshToken / RevokeToken) in the end-to-end flow test.
+func (f *fakeTokenStore) Locate(ctx context.Context, key *TokenKey, entry *TokenEntry) error {
+	return f.Update(ctx, key, entry)
+}
+
 func (f *fakeTokenStore) FindMany(_ context.Context, filter any, _, _ int32) ([]*TokenEntry, error) {
 	f.lastFilter = filter
 	want, byServer := "", false
