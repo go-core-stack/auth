@@ -158,12 +158,3 @@ func (m *OAuthManager) initManagerEncryptor(cfg OAuthConfig) (utils.IOEncryptor,
 func (m *OAuthManager) httpDo(req *http.Request) (*http.Response, error) {
 	return m.httpClient.Do(req)
 }
-
-// refreshToken performs the token refresh exchange with the authorization
-// server. The real RFC 6749 §6 implementation lands in AUTH-0007; until then it
-// returns errRefreshNotImplemented so the token reconciler wires through without
-// hot-looping. Both the proactive reconciler and on-demand GetToken (AUTH-0007)
-// will share this path and the token-refresh lock.
-func (m *OAuthManager) refreshToken(ctx context.Context, key *TokenKey, entry *TokenEntry) (*TokenEntry, error) {
-	return nil, errRefreshNotImplemented
-}
