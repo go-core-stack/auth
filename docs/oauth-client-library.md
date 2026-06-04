@@ -27,11 +27,13 @@ callback endpoint and the frontend redirect.
 | In Scope | Out of Scope |
 |----------|--------------|
 | Server discovery (RFC 9728 / 8414 / OIDC) | Hosting HTTP callback/initiate endpoints |
-| Dynamic client registration (RFC 7591), public clients | Confidential clients / secret rotation |
-| Authorization Code + PKCE (RFC 7636) | Multiple clients per server |
-| Token persist / refresh / revoke (RFC 7009) | Static client registration body (stub only) |
-| Field-level encryption at rest | Consumer's UI / redirect rendering |
-| Cross-replica locking + reconciler refresh | Provider-specific business logic |
+| Dynamic client registration (RFC 7591), public clients | Confidential-client secret rotation |
+| Static client registration (consumer-provided credentials) | Consumer's UI / redirect rendering |
+| Multiple clients per server via `ClientRef` (multi-tenant) | Provider-specific business logic |
+| Authorization Code + PKCE (RFC 7636) | |
+| Token persist / refresh / revoke (RFC 7009) | |
+| Field-level encryption at rest | |
+| Cross-replica locking + reconciler refresh | |
 
 ---
 
@@ -65,12 +67,17 @@ auth/
 
 ### 3.1 Database & Collections
 
-| Collection            | Key                       | Purpose                                            |
-|-----------------------|---------------------------|----------------------------------------------------|
-| `servers`             | `ServerURL` (string)      | Cached discovery metadata per remote server        |
-| `clients`             | `ServerURL` (string)      | Registered OAuth client per remote server          |
-| `tokens`              | `{ServerURL, AccountID}`  | OAuth tokens per (server × account) pair           |
-| `pending_auth_states` | `State` (string)          | Transient PKCE/CSRF state for in-flight flows      |
+| Collection            | Key                                 | Purpose                                            |
+|-----------------------|-------------------------------------|----------------------------------------------------|
+| `servers`             | `ServerURL` (string)                | Cached discovery metadata per remote server        |
+| `clients`             | `{ServerURL, ClientRef}`            | Registered OAuth client per (server × client-ref)  |
+| `tokens`              | `{ServerURL, ClientRef, AccountID}` | OAuth tokens per (server × client-ref × account)    |
+| `pending_auth_states` | `State` (string)                    | Transient PKCE/CSRF state for in-flight flows      |
+
+`ClientRef` is a consumer-defined opaque label that disambiguates multiple
+clients registered against the same server (see §3.5). Dynamic registrations use
+the empty `ClientRef` (`""`), which `omitempty` omits from the stored key — so
+single-client deployments and existing data are unaffected.
 
 These collections live in the `db.Store` the consumer supplies to
 `NewOAuthManager` — the consuming service owns the connection and chooses the
@@ -108,6 +115,7 @@ type ServerEntry struct {
 // --- clients ---
 type ClientKey struct {
     ServerURL string `bson:"serverUrl"`
+    ClientRef string `bson:"clientRef,omitempty"` // consumer label; "" = dynamic
 }
 
 type ClientEntry struct {
@@ -126,6 +134,7 @@ type ClientEntry struct {
 // --- tokens ---
 type TokenKey struct {
     ServerURL string `bson:"serverUrl"`
+    ClientRef string `bson:"clientRef,omitempty"` // consumer label; "" = dynamic
     AccountID string `bson:"accountId"`
 }
 
@@ -157,6 +166,7 @@ type PendingAuthStateKey struct {
 
 type PendingAuthState struct {
     ServerURL    string    `bson:"serverUrl"`
+    ClientRef    string    `bson:"clientRef,omitempty"` // recovered by HandleCallback to build the TokenKey
     AccountID    string    `bson:"accountId"`
     CodeVerifier string    `bson:"codeVerifier"` // encrypted at rest
     RedirectURI  string    `bson:"redirectUri"`
@@ -189,16 +199,60 @@ pattern, using `utils.IOEncryptor` from `go-core-stack/core/utils`.
 ```go
 type RegistrationLockKey struct {
     ServerURL string `bson:"serverUrl"`
+    ClientRef string `bson:"clientRef,omitempty"`
 }
 
 type TokenRefreshLockKey struct {
     ServerURL string `bson:"serverUrl"`
+    ClientRef string `bson:"clientRef,omitempty"`
     AccountID string `bson:"accountId"`
 }
 ```
 
 Lock table names: `auth-library-registration-locks`,
-`auth-library-token-refresh-locks`.
+`auth-library-token-refresh-locks`. Including `ClientRef` keeps registration and
+refresh of one client from serializing on another client for the same server (or
+the same `(server, account)` pair).
+
+### 3.5 Multi-Client Support (`ClientRef`)
+
+A single deployment can register **multiple OAuth clients against the same
+server** — e.g. one static/confidential client per tenant, each with its own
+credentials. They are disambiguated by `ClientRef`.
+
+- **`ClientRef` is not `ClientID`.** `ClientEntry.ClientID` is the
+  OAuth-protocol identifier issued by the authorization server. `ClientRef` is a
+  *consumer-side* opaque label (tenant slug, config name, integration id) with no
+  protocol meaning; it exists only to key storage and retrieval.
+- **Key model.** `(ServerURL, ClientRef)` is unique per client;
+  `(ServerURL, ClientRef, AccountID)` is unique per token. Every client- and
+  token-resolving key carries `ClientRef`.
+- **Dynamic vs static.** Dynamic registration uses `ClientRef == ""` (the
+  implicit single-client slot). Static registration requires a non-empty
+  `ClientRef`; `RegisterStaticClient` rejects `""` so a static client can never
+  collide with the dynamic slot.
+- **No migration.** `ClientRef` uses the `omitempty` BSON tag. Writes with `""`
+  omit the field entirely, so new dynamic documents are byte-for-byte compatible
+  with pre-multi-client data, and existing documents (which lack the field)
+  decode to `ClientRef: ""`. No index changes are needed — the `core/table`
+  layer builds indexes from the struct tags, including `omitempty` semantics.
+
+```go
+// Register a tenant's pre-provisioned client once.
+err := mgr.RegisterStaticClient(ctx, "https://auth.example.com", "tenant-acme", oauth.ClientEntry{
+    ClientID:     "acme-client-id",
+    ClientSecret: "acme-client-secret",
+    ClientType:   "confidential",
+    RedirectURIs: []string{"https://app.example.com/callback"},
+    Scopes:       []string{"openid", "profile"},
+})
+
+// Subsequent token operations reference the same ClientRef.
+tok, err := mgr.GetToken(ctx, "https://auth.example.com", "tenant-acme", "user-123")
+
+// Dynamic (single-client) callers pass "".
+tok, err = mgr.GetToken(ctx, "https://auth.example.com", "", "user-123")
+```
 
 ---
 
@@ -235,6 +289,7 @@ func (m *OAuthManager) GetCachedServer(ctx context.Context, serverURL string) (*
 ```go
 type RegisterClientOptions struct {
     ServerURL    string
+    ClientRef    string   // consumer label; "" for the dynamic single-client slot
     ClientName   string   // defaults to OAuthConfig.ClientName
     RedirectURIs []string // defaults to []string{OAuthConfig.RedirectURI}
     Scopes       []string // defaults to OAuthConfig.Scopes
@@ -243,9 +298,13 @@ type RegisterClientOptions struct {
 
 func (m *OAuthManager) RegisterDynamicClient(ctx context.Context, opts RegisterClientOptions) (*ClientEntry, error)
 func (m *OAuthManager) ReRegisterClient(ctx context.Context, opts RegisterClientOptions) (*ClientEntry, error)
-func (m *OAuthManager) GetClient(ctx context.Context, serverURL string) (*ClientEntry, error)
-func (m *OAuthManager) RegisterStaticClient(ctx context.Context, serverURL string, entry ClientEntry) error // TODO: errors.Unimplemented
+func (m *OAuthManager) GetClient(ctx context.Context, serverURL, clientRef string) (*ClientEntry, error)
+func (m *OAuthManager) RegisterStaticClient(ctx context.Context, serverURL, clientRef string, entry ClientEntry) error
 ```
+
+`RegisterStaticClient` upserts a consumer-provided client under a **non-empty**
+`ClientRef` (it rejects `""`), setting `RegistrationType = "static"`. `GetClient`
+takes the `clientRef` selecting which client to retrieve for the server.
 
 ### 4.4 Authorization (PKCE)
 
@@ -264,6 +323,7 @@ type AuthorizationParams struct {
 
 type AuthorizeOptions struct {
     ServerURL   string
+    ClientRef   string            // selects the client; "" for the dynamic slot
     AccountID   string            // consumer's opaque identifier — never sent to server
     RedirectURI string            // defaults to OAuthConfig.RedirectURI
     Scopes      []string          // defaults to OAuthConfig.Scopes
@@ -277,17 +337,27 @@ func (m *OAuthManager) HandleCallback(ctx context.Context, state string, code st
 `AuthorizationURL` returns **tokenized params**, not a full URL string — the
 consumer's frontend reconstructs the redirect URL. The `state` value in the
 callback URL is the session handle; there is no in-memory session object.
+`AuthorizationURL` records `opts.ClientRef` in the persisted `PendingAuthState`,
+and `HandleCallback` recovers it to store the resulting token under the correct
+`TokenKey` — so neither signature needs a `clientRef` parameter.
 
 ### 4.5 Token Management
 
 ```go
-func (m *OAuthManager) GetToken(ctx context.Context, serverURL, accountID string) (*TokenEntry, error)        // near-expiry auto-refresh
-func (m *OAuthManager) RefreshToken(ctx context.Context, serverURL, accountID string) (*TokenEntry, error)    // forced
-func (m *OAuthManager) RevokeToken(ctx context.Context, serverURL, accountID string) error                    // RFC 7009
-func (m *OAuthManager) DeleteToken(ctx context.Context, serverURL, accountID string) error
-func (m *OAuthManager) GetSessionState(ctx context.Context, serverURL, accountID string) (SessionState, error)
-func (m *OAuthManager) ListTokens(ctx context.Context, serverURL string) ([]*TokenEntry, error)
+func (m *OAuthManager) GetToken(ctx context.Context, serverURL, clientRef, accountID string) (*TokenEntry, error)        // near-expiry auto-refresh
+func (m *OAuthManager) RefreshToken(ctx context.Context, serverURL, clientRef, accountID string) (*TokenEntry, error)    // forced
+func (m *OAuthManager) RevokeToken(ctx context.Context, serverURL, clientRef, accountID string) error                    // RFC 7009
+func (m *OAuthManager) DeleteToken(ctx context.Context, serverURL, clientRef, accountID string) error
+func (m *OAuthManager) GetSessionState(ctx context.Context, serverURL, clientRef, accountID string) (SessionState, error)
+func (m *OAuthManager) ListTokens(ctx context.Context, serverURL, clientRef string) ([]*TokenEntry, error)
 ```
+
+Every token method takes `clientRef` (between `serverURL` and `accountID`;
+`ListTokens` after `serverURL`). Dynamic callers pass `""`. `ListTokens` is
+scoped to a **single** `ClientRef` — there is no wildcard/list-all mode; its
+primary use is invalidating a static client's tokens when that client is removed.
+The `""` case matches dynamic tokens via an absent-or-empty filter
+(`$in:["", nil]`), since dynamic documents omit the `clientRef` field entirely.
 
 ---
 
@@ -312,7 +382,7 @@ RegisterDynamicClient(opts)
   ├── merge opts with config defaults
   ├── clientTable has entry? → return (idempotent)
   └── else:
-      ├── acquire registration lock (key=serverURL)
+      ├── acquire registration lock (key={serverURL, clientRef})
       ├── double-check clientTable
       ├── DiscoverServer(serverURL)
       ├── POST {registrationEndpoint}  (RFC 7591, token_endpoint_auth_method:"none")
@@ -340,10 +410,10 @@ HandleCallback(state, code)
 
 ### 5.4 Token Refresh
 ```
-GetToken(serverURL, accountID)
+GetToken(serverURL, clientRef, accountID)
   ├── ExpiresAt > now + threshold → return as-is
   └── near expiry:
-      ├── acquire refresh lock; re-read token
+      ├── acquire refresh lock (key={serverURL, clientRef, accountID}); re-read token
       ├── POST {tokenEndpoint} grant_type=refresh_token
       │     success      → update, state=active
       │     transient    → state=failed, keep token
@@ -426,10 +496,12 @@ when a consumer requires them:
 
 | Item | Current Decision | Re-evaluate When |
 |------|------------------|------------------|
-| Confidential (private) clients | Only public clients supported | A consumer requires `token_endpoint_auth_method` other than `none` |
-| Static client registration | Interface defined; body returns `errors.Unimplemented` | A target server does not support RFC 7591 dynamic registration |
+| Confidential-client secret rotation | Static clients store provided credentials; no rotation flow | A consumer needs automated secret rotation |
 | Client expiry detection | Reactive — re-register on `invalid_client` → `revoked` | Servers begin issuing short-lived client registrations |
-| Multiple clients per server | One client per server (key = `ServerURL`) | A consumer needs distinct clients on the same server |
+| `ListTokens` wildcard / list-all mode | Scoped to a single `ClientRef`; no cross-ref listing | A consumer needs to enumerate every client's tokens for a server |
+
+> **Now supported (was deferred):** static client registration and multiple
+> clients per server — both delivered via the `ClientRef` key model (§3.5).
 
 ---
 

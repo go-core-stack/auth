@@ -425,10 +425,23 @@ func getSessionState(ctx context.Context, tokens tokenStore, serverURL, clientRe
 // listTokens implements ListTokens. The listing is scoped to a single clientRef
 // on the token key (_id): an empty serverURL spans every server for that
 // clientRef, a non-empty one also filters by the normalized server URL. A zero
-// limit means no limit. (Final filter scoping for the dynamic "" clientRef is
-// finalized in AUTH-0012.)
+// limit means no limit.
+//
+// The clientRef filter is asymmetric. A non-empty clientRef is a plain equality.
+// The dynamic case (clientRef == "") must NOT use a naive {"_id.clientRef": ""}:
+// dynamic token documents omit clientRef entirely (the omitempty BSON tag), and
+// in MongoDB an equality against "" does not match a document that lacks the
+// field. Match absent-or-empty explicitly with $in:["",nil] instead. (Point
+// lookups — GetToken/DeleteToken/etc. — marshal the full TokenKey _id with
+// omitempty, so they already match correctly and need no special-casing; this
+// asymmetry is unique to ListTokens' partial filter.)
 func listTokens(ctx context.Context, tokens tokenStore, serverURL string, clientRef string) ([]*TokenEntry, error) {
-	filter := bson.M{"_id.clientRef": clientRef}
+	filter := bson.M{}
+	if clientRef == "" {
+		filter["_id.clientRef"] = bson.M{"$in": bson.A{"", nil}}
+	} else {
+		filter["_id.clientRef"] = clientRef
+	}
 	if normalized := normalizeServerURL(serverURL); normalized != "" {
 		filter["_id.serverUrl"] = normalized
 	}

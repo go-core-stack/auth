@@ -154,8 +154,11 @@ func (r *tokenRefreshReconciler) Reconcile(k any) (*reconciler.Result, error) {
 		return &reconciler.Result{RequeueAfter: timeUntilRefresh(entry, now)}, nil
 	}
 
-	// near expiry — serialize refresh across instances with a distributed lock
-	lock, err := r.locks.TryAcquire(ctx, &TokenRefreshLockKey{ServerURL: key.ServerURL, AccountID: key.AccountID})
+	// near expiry — serialize refresh across instances with a distributed lock.
+	// The lock key carries ClientRef (sourced from the token key) so a static
+	// client's refresh does not serialize on the dynamic slot — or another
+	// client — for the same (server, account) pair.
+	lock, err := r.locks.TryAcquire(ctx, &TokenRefreshLockKey{ServerURL: key.ServerURL, ClientRef: key.ClientRef, AccountID: key.AccountID})
 	if err != nil {
 		// another instance is refreshing (or the lock is briefly contended);
 		// back off and retry rather than spinning
@@ -163,7 +166,7 @@ func (r *tokenRefreshReconciler) Reconcile(k any) (*reconciler.Result, error) {
 	}
 	defer func() {
 		if cerr := lock.Close(); cerr != nil {
-			log.Printf("oauth: failed to release token-refresh lock for %s/%s: %s", key.ServerURL, key.AccountID, cerr)
+			log.Printf("oauth: failed to release token-refresh lock for %s: %s", key.id(), cerr)
 		}
 	}()
 
@@ -196,14 +199,14 @@ func (r *tokenRefreshReconciler) Reconcile(k any) (*reconciler.Result, error) {
 			return nil, nil
 		case errors.Is(err, errRefreshNotImplemented):
 			// AUTH-0007 will wire the real exchange; defer to avoid a hot loop
-			log.Printf("oauth: token refresh not yet implemented (AUTH-0007); deferring %s/%s", key.ServerURL, key.AccountID)
+			log.Printf("oauth: token refresh not yet implemented (AUTH-0007); deferring %s", key.id())
 			return &reconciler.Result{RequeueAfter: RefreshThreshold}, nil
 		default:
 			// transient — requeue with a backoff rather than returning a bare
 			// error (which the pipeline would re-enqueue immediately, hot-looping
 			// the token endpoint during a sustained outage)
-			log.Printf("oauth: transient token-refresh failure for %s/%s, retrying in %s: %s",
-				key.ServerURL, key.AccountID, transientRefreshBackoff, err)
+			log.Printf("oauth: transient token-refresh failure for %s, retrying in %s: %s",
+				key.id(), transientRefreshBackoff, err)
 			return &reconciler.Result{RequeueAfter: transientRefreshBackoff}, nil
 		}
 	}
