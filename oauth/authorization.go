@@ -108,7 +108,7 @@ func authorizationURL(ctx context.Context, servers serverCache, clients clientSt
 
 	// The client must already be registered and the server already discovered:
 	// the consumer drives registration/discovery before starting a flow.
-	client, err := findClient(ctx, clients, normalized)
+	client, err := findClient(ctx, clients, normalized, merged.ClientRef)
 	if err != nil {
 		return nil, err
 	}

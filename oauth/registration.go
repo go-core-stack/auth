@@ -20,16 +20,9 @@ import (
 const (
 	clientTypePublic        = "public"
 	registrationTypeDynamic = "dynamic"
+	registrationTypeStatic  = "static"
 	responseTypeCode        = "code"
 )
-
-// errStaticRegistrationUnimplemented is returned by RegisterStaticClient. Static
-// registration is interface-only in this version (see OPEN-POINTS #2); the
-// method exists so confidential/static support can land later without an API
-// change. core/errors has no dedicated "unimplemented" code, so — mirroring the
-// errRefreshNotImplemented sentinel used by the token reconciler — this is a
-// sentinel matchable with errors.Is.
-var errStaticRegistrationUnimplemented = errors.New("oauth: static client registration is not implemented (see OPEN-POINTS #2)")
 
 // clientStore is the subset of the client table that registration needs. The
 // concrete *table.Table[ClientKey, ClientEntry] satisfies it; tests substitute a
@@ -37,6 +30,9 @@ var errStaticRegistrationUnimplemented = errors.New("oauth: static client regist
 type clientStore interface {
 	Find(ctx context.Context, key *ClientKey) (*ClientEntry, error)
 	Insert(ctx context.Context, key *ClientKey, entry *ClientEntry) error
+	// Locate upserts (insert-or-update); used by static registration to
+	// (re)provision a client keyed by (ServerURL, ClientRef).
+	Locate(ctx context.Context, key *ClientKey, entry *ClientEntry) error
 	DeleteKey(ctx context.Context, key *ClientKey) error
 }
 
@@ -90,17 +86,21 @@ func (m *OAuthManager) ReRegisterClient(ctx context.Context, opts RegisterClient
 	return reRegisterClient(ctx, m.httpDo, m.clientTable, m.registrationLocks, m.DiscoverServer, m.config, opts)
 }
 
-// GetClient returns the stored client for a server, or (nil, nil) if none has
-// been registered yet. It never performs a network call.
-func (m *OAuthManager) GetClient(ctx context.Context, serverURL string) (*ClientEntry, error) {
-	return getClient(ctx, m.clientTable, serverURL)
+// GetClient returns the stored client for a (server, clientRef) pair, or
+// (nil, nil) if none has been registered yet. clientRef disambiguates multiple
+// clients registered against the same server; dynamic clients use clientRef "".
+// It never performs a network call.
+func (m *OAuthManager) GetClient(ctx context.Context, serverURL string, clientRef string) (*ClientEntry, error) {
+	return getClient(ctx, m.clientTable, serverURL, clientRef)
 }
 
-// RegisterStaticClient is the entry point for statically (pre-)provisioned
-// clients. It is interface-only in this version and always returns
-// errStaticRegistrationUnimplemented (see OPEN-POINTS #2).
-func (m *OAuthManager) RegisterStaticClient(_ context.Context, _ string, _ ClientEntry) error {
-	return errStaticRegistrationUnimplemented
+// RegisterStaticClient (pre-)provisions a confidential/static OAuth client under
+// a consumer-defined clientRef. Unlike dynamic registration it performs no
+// network call: the consumer supplies the credentials in entry, which are
+// upserted (encrypted at rest) keyed by (ServerURL, ClientRef). clientRef must
+// be non-empty — "" is reserved exclusively for the dynamic client slot.
+func (m *OAuthManager) RegisterStaticClient(ctx context.Context, serverURL string, clientRef string, entry ClientEntry) error {
+	return registerStaticClient(ctx, m.clientTable, serverURL, clientRef, entry)
 }
 
 // registerDynamicClient implements RegisterDynamicClient against the
@@ -112,10 +112,12 @@ func registerDynamicClient(ctx context.Context, do httpDoFunc, clients clientSto
 		return nil, errors.Wrap(errors.InvalidArgument, "oauth: serverURL must not be empty")
 	}
 	merged := mergeRegisterOptions(cfg, opts)
+	// clientRef disambiguates clients for the same server; dynamic uses "".
+	clientRef := opts.ClientRef
 
 	// Idempotent fast path: return an already-registered client without taking
 	// the lock or touching the network.
-	existing, err := findClient(ctx, clients, normalized)
+	existing, err := findClient(ctx, clients, normalized, clientRef)
 	if err != nil {
 		return nil, err
 	}
@@ -123,9 +125,11 @@ func registerDynamicClient(ctx context.Context, do httpDoFunc, clients clientSto
 		return existing, nil
 	}
 
-	// Serialize registration per server across replicas. TryAcquire is
-	// non-blocking: it fails when another replica currently holds the lock.
-	lock, err := locks.TryAcquire(ctx, &RegistrationLockKey{ServerURL: normalized})
+	// Serialize registration per (server, clientRef) across replicas. Keying the
+	// lock on clientRef too means static and dynamic registrations for the same
+	// server do not serialize on each other. TryAcquire is non-blocking: it
+	// fails when another replica currently holds the lock.
+	lock, err := locks.TryAcquire(ctx, &RegistrationLockKey{ServerURL: normalized, ClientRef: clientRef})
 	if err != nil {
 		// A peer is registering this server right now. It may already have
 		// finished between our fast-path miss and this acquire attempt; re-check
@@ -133,7 +137,7 @@ func registerDynamicClient(ctx context.Context, do httpDoFunc, clients clientSto
 		// registration does not surface a spurious error. If the peer is still
 		// in flight (no entry yet), surface a retryable error rather than
 		// blocking — core/sync offers no blocking acquire.
-		if existing, ferr := findClient(ctx, clients, normalized); ferr == nil && existing != nil {
+		if existing, ferr := findClient(ctx, clients, normalized, clientRef); ferr == nil && existing != nil {
 			return existing, nil
 		}
 		return nil, errors.Wrapf(errors.GetErrCode(err),
@@ -144,7 +148,7 @@ func registerDynamicClient(ctx context.Context, do httpDoFunc, clients clientSto
 
 	// Double-check inside the lock: another replica may have registered between
 	// our fast-path miss and acquiring the lock.
-	existing, err = findClient(ctx, clients, normalized)
+	existing, err = findClient(ctx, clients, normalized, clientRef)
 	if err != nil {
 		return nil, err
 	}
@@ -152,7 +156,7 @@ func registerDynamicClient(ctx context.Context, do httpDoFunc, clients clientSto
 		return existing, nil
 	}
 
-	return performRegistration(ctx, do, clients, discover, merged, normalized)
+	return performRegistration(ctx, do, clients, discover, merged, normalized, clientRef)
 }
 
 // reRegisterClient forces a fresh registration: under the per-server lock it
@@ -167,13 +171,15 @@ func reRegisterClient(ctx context.Context, do httpDoFunc, clients clientStore, l
 		return nil, errors.Wrap(errors.InvalidArgument, "oauth: serverURL must not be empty")
 	}
 	merged := mergeRegisterOptions(cfg, opts)
+	// clientRef disambiguates clients for the same server; dynamic uses "".
+	clientRef := opts.ClientRef
 
 	// Acquire the lock BEFORE the delete so the replace is atomic. Unlike the
 	// dynamic path there is no fast-path/return-existing on contention: a
 	// re-register caller wants a definitively fresh client, so on lock
 	// contention we surface a retryable error rather than another replica's
 	// (possibly the very client we were asked to replace) entry.
-	lock, err := locks.TryAcquire(ctx, &RegistrationLockKey{ServerURL: normalized})
+	lock, err := locks.TryAcquire(ctx, &RegistrationLockKey{ServerURL: normalized, ClientRef: clientRef})
 	if err != nil {
 		return nil, errors.Wrapf(errors.GetErrCode(err),
 			"oauth: registration already in progress for %s: %s", normalized, err)
@@ -181,12 +187,12 @@ func reRegisterClient(ctx context.Context, do httpDoFunc, clients clientStore, l
 	defer func() { _ = lock.Close() }()
 
 	// Delete the existing record under the lock; tolerate its absence.
-	if err := clients.DeleteKey(ctx, &ClientKey{ServerURL: normalized}); err != nil && !errors.IsNotFound(err) {
+	if err := clients.DeleteKey(ctx, &ClientKey{ServerURL: normalized, ClientRef: clientRef}); err != nil && !errors.IsNotFound(err) {
 		return nil, errors.Wrapf(errors.GetErrCode(err),
 			"oauth: failed to delete existing client for %s: %s", normalized, err)
 	}
 
-	return performRegistration(ctx, do, clients, discover, merged, normalized)
+	return performRegistration(ctx, do, clients, discover, merged, normalized, clientRef)
 }
 
 // performRegistration runs the RFC 7591 dynamic registration body for an
@@ -195,7 +201,7 @@ func reRegisterClient(ctx context.Context, do httpDoFunc, clients clientStore, l
 // the per-server registration lock and MUST have established that no client
 // should be returned from cache first (fast-path / double-check, or a delete for
 // re-registration).
-func performRegistration(ctx context.Context, do httpDoFunc, clients clientStore, discover discoverFunc, merged RegisterClientOptions, normalized string) (*ClientEntry, error) {
+func performRegistration(ctx context.Context, do httpDoFunc, clients clientStore, discover discoverFunc, merged RegisterClientOptions, normalized, clientRef string) (*ClientEntry, error) {
 	// Ensure we have server metadata, specifically the registration endpoint.
 	server, err := discover(ctx, normalized)
 	if err != nil {
@@ -239,27 +245,56 @@ func performRegistration(ctx context.Context, do httpDoFunc, clients clientStore
 	}
 
 	// Persist; sensitive fields are encrypted at rest by ClientEntry.MarshalBSON.
-	if err := clients.Insert(ctx, &ClientKey{ServerURL: normalized}, entry); err != nil {
+	if err := clients.Insert(ctx, &ClientKey{ServerURL: normalized, ClientRef: clientRef}, entry); err != nil {
 		return nil, errors.Wrapf(errors.GetErrCode(err),
 			"oauth: failed to persist registered client for %s: %s", normalized, err)
 	}
 	return entry, nil
 }
 
+// registerStaticClient implements RegisterStaticClient against the clientStore
+// interface so it is unit-testable with a fake. clientRef must be non-empty;
+// the (already consumer-supplied) entry is stamped with static metadata and
+// upserted under (ServerURL, ClientRef), encrypted at rest by
+// ClientEntry.MarshalBSON.
+func registerStaticClient(ctx context.Context, clients clientStore, serverURL, clientRef string, entry ClientEntry) error {
+	// "" is reserved exclusively for the dynamic client slot.
+	if strings.TrimSpace(clientRef) == "" {
+		return errors.Wrap(errors.InvalidArgument,
+			"oauth: clientRef must not be empty for static client registration")
+	}
+	normalized := normalizeServerURL(serverURL)
+	if normalized == "" {
+		return errors.Wrap(errors.InvalidArgument, "oauth: serverURL must not be empty")
+	}
+
+	entry.RegistrationType = registrationTypeStatic
+	entry.RegisteredAt = time.Now().Unix()
+
+	// Upsert so a static client can be re-provisioned (e.g. rotated secret)
+	// without a separate delete. Sensitive fields are encrypted at rest by
+	// ClientEntry.MarshalBSON, exactly as on the dynamic path.
+	if err := clients.Locate(ctx, &ClientKey{ServerURL: normalized, ClientRef: clientRef}, &entry); err != nil {
+		return errors.Wrapf(errors.GetErrCode(err),
+			"oauth: failed to persist static client for %s (clientRef %q): %s", normalized, clientRef, err)
+	}
+	return nil
+}
+
 // getClient implements GetClient's read-only lookup, mapping a cache miss to
 // (nil, nil).
-func getClient(ctx context.Context, clients clientStore, serverURL string) (*ClientEntry, error) {
+func getClient(ctx context.Context, clients clientStore, serverURL, clientRef string) (*ClientEntry, error) {
 	normalized := normalizeServerURL(serverURL)
 	if normalized == "" {
 		return nil, errors.Wrap(errors.InvalidArgument, "oauth: serverURL must not be empty")
 	}
-	return findClient(ctx, clients, normalized)
+	return findClient(ctx, clients, normalized, clientRef)
 }
 
-// findClient looks up a client by normalized server URL, mapping NotFound to
-// (nil, nil) and surfacing any other error.
-func findClient(ctx context.Context, clients clientStore, normalized string) (*ClientEntry, error) {
-	entry, err := clients.Find(ctx, &ClientKey{ServerURL: normalized})
+// findClient looks up a client by normalized server URL and clientRef, mapping
+// NotFound to (nil, nil) and surfacing any other error.
+func findClient(ctx context.Context, clients clientStore, normalized, clientRef string) (*ClientEntry, error) {
+	entry, err := clients.Find(ctx, &ClientKey{ServerURL: normalized, ClientRef: clientRef})
 	if err != nil {
 		if errors.IsNotFound(err) {
 			return nil, nil
