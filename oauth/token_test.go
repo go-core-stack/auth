@@ -488,6 +488,109 @@ func TestRefreshTokenExchange_Success(t *testing.T) {
 	}
 }
 
+// attachClientAuth is the single chokepoint for token-endpoint client
+// authentication: a confidential client with a non-empty secret sends
+// client_secret_post; a public client — or a confidential client whose secret is
+// empty — sends client_id only.
+func TestAttachClientAuth(t *testing.T) {
+	cases := []struct {
+		name       string
+		client     *ClientEntry
+		wantSecret string // "" means client_secret must be absent
+	}{
+		{
+			name:       "confidential with secret sends client_secret",
+			client:     &ClientEntry{ClientID: "client-abc", ClientSecret: "s3cret", ClientType: ClientTypeConfidential},
+			wantSecret: "s3cret",
+		},
+		{
+			name:       "public sends client_id only",
+			client:     &ClientEntry{ClientID: "client-abc", ClientType: ClientTypePublic},
+			wantSecret: "",
+		},
+		{
+			name:       "confidential with empty secret sends no client_secret",
+			client:     &ClientEntry{ClientID: "client-abc", ClientType: ClientTypeConfidential},
+			wantSecret: "",
+		},
+		{
+			name:       "public ignores a stray secret",
+			client:     &ClientEntry{ClientID: "client-abc", ClientSecret: "leftover", ClientType: ClientTypePublic},
+			wantSecret: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			form := url.Values{}
+			attachClientAuth(form, tc.client)
+			if form.Get("client_id") != "client-abc" {
+				t.Errorf("client_id = %q, want client-abc", form.Get("client_id"))
+			}
+			if tc.wantSecret == "" {
+				if form.Has("client_secret") {
+					t.Errorf("client_secret must be absent, got %q", form.Get("client_secret"))
+				}
+			} else if form.Get("client_secret") != tc.wantSecret {
+				t.Errorf("client_secret = %q, want %q", form.Get("client_secret"), tc.wantSecret)
+			}
+		})
+	}
+}
+
+// A confidential client must present client_secret on the refresh exchange.
+func TestRefreshTokenExchange_ConfidentialSendsSecret(t *testing.T) {
+	servers := newFakeServerCache()
+	servers.entries["https://api.example.com"] = revServer()
+	clients := newFakeClientStore()
+	clients.entries["https://api.example.com"] = &ClientEntry{
+		ClientID: "client-abc", ClientSecret: "s3cret", ClientType: ClientTypeConfidential,
+	}
+
+	var sentForm url.Values
+	do := func(req *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(req.Body)
+		sentForm, _ = url.ParseQuery(string(body))
+		return jsonResponse(tokenResp), nil
+	}
+
+	prev := &TokenEntry{AccessToken: "old", RefreshToken: "rt-old", State: SessionActive}
+	if _, err := refreshTokenExchange(context.Background(), do, servers, clients, testTokenKey(), prev); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sentForm.Get("client_id") != "client-abc" {
+		t.Errorf("client_id = %q", sentForm.Get("client_id"))
+	}
+	if sentForm.Get("client_secret") != "s3cret" {
+		t.Errorf("confidential refresh must send client_secret, got %q", sentForm.Get("client_secret"))
+	}
+}
+
+// A public client must not present client_secret on the refresh exchange.
+func TestRefreshTokenExchange_PublicNoSecret(t *testing.T) {
+	servers := newFakeServerCache()
+	servers.entries["https://api.example.com"] = revServer()
+	clients := newFakeClientStore()
+	clients.entries["https://api.example.com"] = &ClientEntry{ClientID: "client-abc", ClientType: ClientTypePublic}
+
+	var sentForm url.Values
+	do := func(req *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(req.Body)
+		sentForm, _ = url.ParseQuery(string(body))
+		return jsonResponse(tokenResp), nil
+	}
+
+	prev := &TokenEntry{AccessToken: "old", RefreshToken: "rt-old", State: SessionActive}
+	if _, err := refreshTokenExchange(context.Background(), do, servers, clients, testTokenKey(), prev); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sentForm.Get("client_id") != "client-abc" {
+		t.Errorf("client_id = %q", sentForm.Get("client_id"))
+	}
+	if sentForm.Has("client_secret") {
+		t.Errorf("public refresh must not send client_secret, got %q", sentForm.Get("client_secret"))
+	}
+}
+
 // A refresh response that omits refresh_token must retain the prior one.
 func TestRefreshTokenExchange_KeepsPriorRefreshToken(t *testing.T) {
 	servers := newFakeServerCache()
@@ -621,6 +724,62 @@ func TestRevokeToken_Success(t *testing.T) {
 	}
 	if tokens.entries[*testTokenKey()].State != SessionRevoked {
 		t.Errorf("token must be marked revoked locally")
+	}
+}
+
+// A confidential client must present client_secret on the revocation request.
+func TestRevokeToken_ConfidentialSendsSecret(t *testing.T) {
+	tokens := newFakeTokenStore()
+	tokens.entries[*testTokenKey()] = &TokenEntry{AccessToken: "at", RefreshToken: "rt", State: SessionActive}
+	servers := newFakeServerCache()
+	servers.entries["https://api.example.com"] = revServer()
+	clients := newFakeClientStore()
+	clients.entries["https://api.example.com"] = &ClientEntry{
+		ClientID: "client-abc", ClientSecret: "s3cret", ClientType: ClientTypeConfidential,
+	}
+
+	var sentForm url.Values
+	do := func(req *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(req.Body)
+		sentForm, _ = url.ParseQuery(string(body))
+		return statusResponse(http.StatusOK), nil
+	}
+
+	if err := revokeToken(context.Background(), tokens, do, servers, clients, "https://api.example.com", "", "acct-1"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sentForm.Get("client_id") != "client-abc" {
+		t.Errorf("client_id = %q", sentForm.Get("client_id"))
+	}
+	if sentForm.Get("client_secret") != "s3cret" {
+		t.Errorf("confidential revocation must send client_secret, got %q", sentForm.Get("client_secret"))
+	}
+}
+
+// A public client must not present client_secret on the revocation request.
+func TestRevokeToken_PublicNoSecret(t *testing.T) {
+	tokens := newFakeTokenStore()
+	tokens.entries[*testTokenKey()] = &TokenEntry{AccessToken: "at", RefreshToken: "rt", State: SessionActive}
+	servers := newFakeServerCache()
+	servers.entries["https://api.example.com"] = revServer()
+	clients := newFakeClientStore()
+	clients.entries["https://api.example.com"] = &ClientEntry{ClientID: "client-abc", ClientType: ClientTypePublic}
+
+	var sentForm url.Values
+	do := func(req *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(req.Body)
+		sentForm, _ = url.ParseQuery(string(body))
+		return statusResponse(http.StatusOK), nil
+	}
+
+	if err := revokeToken(context.Background(), tokens, do, servers, clients, "https://api.example.com", "", "acct-1"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sentForm.Get("client_id") != "client-abc" {
+		t.Errorf("client_id = %q", sentForm.Get("client_id"))
+	}
+	if sentForm.Has("client_secret") {
+		t.Errorf("public revocation must not send client_secret, got %q", sentForm.Get("client_secret"))
 	}
 }
 

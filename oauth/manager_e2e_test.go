@@ -182,7 +182,7 @@ func TestEndToEndFlow(t *testing.T) {
 	}
 
 	// 4. Callback — exchange the code, persist the token, consume pending state.
-	token, err := handleCallback(ctx, do, servers, pending, tokens, params.State, "auth-code-xyz")
+	token, err := handleCallback(ctx, do, servers, pending, tokens, clients, params.State, "auth-code-xyz")
 	if err != nil {
 		t.Fatalf("callback: %v", err)
 	}
