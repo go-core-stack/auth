@@ -723,3 +723,20 @@ func TestNewTokenEntry_ScopeFallback(t *testing.T) {
 		t.Errorf("State = %q", entry.State)
 	}
 }
+
+// newTokenEntry must capture refresh capability explicitly from the response: a
+// refresh token means Refreshable; its absence means NoRefresh, so a later forced
+// refresh cannot wrongly revoke a non-refreshable (offline) token.
+func TestNewTokenEntry_RefreshPolicy(t *testing.T) {
+	ps := &PendingAuthState{Scopes: []string{"read"}}
+
+	withRT := newTokenEntry(&tokenResponse{AccessToken: "at", RefreshToken: "rt"}, ps, time.Now())
+	if withRT.RefreshPolicy != RefreshPolicyRefreshable {
+		t.Errorf("RefreshPolicy = %d, want Refreshable when a refresh token is present", withRT.RefreshPolicy)
+	}
+
+	noRT := newTokenEntry(&tokenResponse{AccessToken: "at"}, ps, time.Now())
+	if noRT.RefreshPolicy != RefreshPolicyNoRefresh {
+		t.Errorf("RefreshPolicy = %d, want NoRefresh when the response omits a refresh token", noRT.RefreshPolicy)
+	}
+}

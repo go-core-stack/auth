@@ -147,8 +147,14 @@ type TokenEntry struct {
 	Scopes       []string     `bson:"scopes,omitempty"`
 	IDToken      string       `bson:"idToken,omitempty"` // encrypted at rest
 	State        SessionState `bson:"state"`
-	LastRefresh  int64        `bson:"lastRefresh,omitempty"`
-	ErrorReason  string       `bson:"errorReason,omitempty"`
+	// RefreshPolicy records whether this token may be silently refreshed,
+	// captured explicitly from the server response at exchange time rather than
+	// inferred from an empty RefreshToken (a blanked field is not a reliable
+	// signal). Legacy documents written before this field default to
+	// RefreshPolicyRefreshable (the zero value) on decode, the correct default.
+	RefreshPolicy RefreshPolicy `bson:"refreshPolicy"`
+	LastRefresh   int64         `bson:"lastRefresh,omitempty"`
+	ErrorReason   string        `bson:"errorReason,omitempty"`
 }
 
 // --- pending_auth_states ---

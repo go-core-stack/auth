@@ -35,13 +35,14 @@ func storedString(t *testing.T, v interface{}, field string) string {
 
 func TestTokenEntryEncryptionRoundTrip(t *testing.T) {
 	orig := &TokenEntry{
-		AccessToken:  "super-secret-access-token",
-		TokenType:    "Bearer",
-		RefreshToken: "super-secret-refresh-token",
-		IDToken:      "super-secret-id-token",
-		ExpiresAt:    123456,
-		Scopes:       []string{"read", "write"},
-		State:        SessionActive,
+		AccessToken:   "super-secret-access-token",
+		TokenType:     "Bearer",
+		RefreshToken:  "super-secret-refresh-token",
+		IDToken:       "super-secret-id-token",
+		ExpiresAt:     123456,
+		Scopes:        []string{"read", "write"},
+		State:         SessionActive,
+		RefreshPolicy: RefreshPolicyNoRefresh,
 	}
 
 	data, err := bson.Marshal(orig)
@@ -77,6 +78,47 @@ func TestTokenEntryEncryptionRoundTrip(t *testing.T) {
 	// Non-encrypted fields survive the round-trip.
 	if got.TokenType != orig.TokenType || got.State != orig.State || got.ExpiresAt != orig.ExpiresAt {
 		t.Errorf("non-encrypted fields not preserved: %+v", got)
+	}
+	// RefreshPolicy must persist through the custom (encrypting) marshaler — a new
+	// field on a custom-marshaled struct is silently dropped if the alias pattern
+	// is not used, which would resurrect the empty-token inference bug.
+	if got.RefreshPolicy != orig.RefreshPolicy {
+		t.Errorf("RefreshPolicy not preserved: got %d, want %d", got.RefreshPolicy, orig.RefreshPolicy)
+	}
+}
+
+// A legacy token document persisted before the RefreshPolicy field existed has no
+// refreshPolicy key; it must decode to the zero value RefreshPolicyRefreshable —
+// the correct default that keeps pre-existing refreshable sessions refreshable
+// (no migration shim required).
+func TestTokenEntry_LegacyDocDefaultsToRefreshable(t *testing.T) {
+	// A document written without the refreshPolicy field. Encrypt AccessToken the
+	// same way the marshaler would so UnmarshalBSON's decrypt step succeeds.
+	enc := getEncryptor()
+	ciphertext, err := enc.EncryptString("legacy-access-token")
+	if err != nil {
+		t.Fatalf("encrypt failed: %v", err)
+	}
+	legacy := bson.M{
+		"accessToken": ciphertext,
+		"tokenType":   "Bearer",
+		"state":       int32(SessionActive),
+		// no refreshPolicy key — as written by code predating this field
+	}
+	data, err := bson.Marshal(legacy)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+
+	var got TokenEntry
+	if err := bson.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	if got.RefreshPolicy != RefreshPolicyRefreshable {
+		t.Errorf("legacy doc RefreshPolicy = %d, want Refreshable (0)", got.RefreshPolicy)
+	}
+	if got.AccessToken != "legacy-access-token" {
+		t.Errorf("legacy doc AccessToken = %q, want decrypted plaintext", got.AccessToken)
 	}
 }
 
