@@ -149,6 +149,18 @@ func (r *tokenRefreshReconciler) Reconcile(k any) (*reconciler.Result, error) {
 	}
 
 	now := time.Now()
+
+	// A NoRefresh token must never be auto-refreshed. With no expiry there is
+	// nothing left to track — stop reconciling entirely so offline tokens are
+	// not churned forever. With an expiry, keep requeuing for state bookkeeping
+	// but never attempt a refresh.
+	if entry.RefreshPolicy == RefreshPolicyNoRefresh {
+		if entry.ExpiresAt == 0 {
+			return nil, nil
+		}
+		return &reconciler.Result{RequeueAfter: timeUntilRefresh(entry, now)}, nil
+	}
+
 	if !tokenNeedsRefresh(entry, now) {
 		// healthy — re-check when it approaches the refresh threshold
 		return &reconciler.Result{RequeueAfter: timeUntilRefresh(entry, now)}, nil

@@ -214,6 +214,13 @@ func lockedRefresh(ctx context.Context, tokens tokenStore, locks refreshLockerAP
 	if entry.State == SessionRevoked {
 		return entry, nil
 	}
+	// A NoRefresh token must never be refreshed — not even under a forced
+	// refresh. Short-circuit before the exchange so ForceRefresh on a Shopify
+	// style offline token (no expiry, no refresh token) cannot trip
+	// errPermanentRefresh and revoke a valid session.
+	if entry.RefreshPolicy == RefreshPolicyNoRefresh {
+		return entry, nil
+	}
 	if !force && !tokenNeedsRefresh(entry, time.Now()) {
 		return entry, nil
 	}
@@ -259,9 +266,16 @@ func lockedRefresh(ctx context.Context, tokens tokenStore, locks refreshLockerAP
 // invalid_grant / invalid_client response, is a permanent failure
 // (errPermanentRefresh); other failures are transient.
 func refreshTokenExchange(ctx context.Context, do httpDoFunc, servers serverCache, clients clientStore, key *TokenKey, entry *TokenEntry) (*TokenEntry, error) {
+	if entry.RefreshPolicy == RefreshPolicyNoRefresh {
+		// The server issued a non-refreshable token (e.g. an offline token with
+		// no expiry). There is nothing to refresh — a normal terminal state, not
+		// a failure: hand the entry back unchanged so the caller does not revoke
+		// a perfectly valid session.
+		return entry, nil
+	}
 	if strings.TrimSpace(entry.RefreshToken) == "" {
-		// No refresh token to present — the session can only be restored by a
-		// fresh authorization, so treat it as permanent.
+		// Policy says refreshable but the token is missing — a genuine permanent
+		// failure: the session can only be restored by a fresh authorization.
 		return nil, fmt.Errorf("oauth: no refresh token stored for %s: %w",
 			key.id(), errPermanentRefresh)
 	}
@@ -318,7 +332,12 @@ func refreshedTokenEntry(prev *TokenEntry, tr *tokenResponse, now time.Time) *To
 	}
 	if tr.RefreshToken != "" {
 		updated.RefreshToken = tr.RefreshToken
+		updated.RefreshPolicy = RefreshPolicyRefreshable
 	}
+	// Deliberately do NOT downgrade RefreshPolicy to NoRefresh when the response
+	// omits a refresh token: per RFC 6749 §6 the existing refresh token stays
+	// valid, so a refreshable session remains refreshable. The policy is carried
+	// over from prev via the struct copy above.
 	if tr.IDToken != "" {
 		updated.IDToken = tr.IDToken
 	}

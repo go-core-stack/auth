@@ -299,6 +299,15 @@ func newTokenEntry(tr *tokenResponse, ps *PendingAuthState, now time.Time) *Toke
 		State:        SessionActive,
 		LastRefresh:  now.Unix(),
 	}
+	// Capture refresh capability explicitly from the response: a refresh token
+	// means the session is refreshable; its absence means the server issued a
+	// non-refreshable (e.g. offline) token that must not later trip a permanent
+	// refresh failure on a transiently-blanked field.
+	if strings.TrimSpace(tr.RefreshToken) != "" {
+		entry.RefreshPolicy = RefreshPolicyRefreshable
+	} else {
+		entry.RefreshPolicy = RefreshPolicyNoRefresh
+	}
 	if tr.ExpiresIn > 0 {
 		entry.ExpiresAt = now.Add(time.Duration(tr.ExpiresIn) * time.Second).Unix()
 	}

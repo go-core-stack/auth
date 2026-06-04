@@ -167,6 +167,51 @@ func TestTokenReconciler_RevokedIsDead(t *testing.T) {
 	}
 }
 
+// A NoRefresh token with no expiry must stop reconciling entirely so offline
+// tokens (no expiry, no refresh token) are never churned.
+func TestTokenReconciler_NoRefreshNoExpiryStops(t *testing.T) {
+	ft := newFakeTokenTable()
+	ft.entries[*tokenKey()] = &TokenEntry{State: SessionActive, RefreshPolicy: RefreshPolicyNoRefresh, ExpiresAt: 0}
+	fl := &fakeLocker{}
+	r := &tokenRefreshReconciler{tokens: ft, locks: fl, refresh: failRefresh(t)}
+
+	res, err := r.Reconcile(tokenKey())
+	if err != nil || res != nil {
+		t.Fatalf("NoRefresh + no expiry must stop reconciling, got res=%+v err=%v", res, err)
+	}
+	if fl.acquired != 0 {
+		t.Errorf("NoRefresh token must not acquire the refresh lock")
+	}
+}
+
+// A NoRefresh token with a (near) expiry must keep requeuing for bookkeeping but
+// never acquire the lock or attempt a refresh — a refresh attempt would fail and
+// wrongly revoke a valid session.
+func TestTokenReconciler_NoRefreshWithExpiryRequeuesWithoutRefresh(t *testing.T) {
+	ft := newFakeTokenTable()
+	// Near expiry: a Refreshable token here would be refreshed; NoRefresh must not.
+	ft.entries[*tokenKey()] = &TokenEntry{
+		State: SessionActive, RefreshPolicy: RefreshPolicyNoRefresh,
+		ExpiresAt: time.Now().Add(time.Minute).Unix(),
+	}
+	fl := &fakeLocker{}
+	r := &tokenRefreshReconciler{tokens: ft, locks: fl, refresh: failRefresh(t)}
+
+	res, err := r.Reconcile(tokenKey())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res == nil || res.RequeueAfter <= 0 {
+		t.Errorf("NoRefresh + expiry should requeue with a positive delay, got %+v", res)
+	}
+	if fl.acquired != 0 {
+		t.Errorf("NoRefresh token must not acquire the refresh lock")
+	}
+	if ft.updateCalls != 0 {
+		t.Errorf("NoRefresh token must not be updated, got %d updates", ft.updateCalls)
+	}
+}
+
 func TestTokenReconciler_HealthyRequeues(t *testing.T) {
 	ft := newFakeTokenTable()
 	ft.entries[*tokenKey()] = &TokenEntry{State: SessionActive, ExpiresAt: time.Now().Add(time.Hour).Unix()}

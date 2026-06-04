@@ -433,6 +433,29 @@ func TestLockedRefresh_RevokeDuringExchangeWins(t *testing.T) {
 	}
 }
 
+// A NoRefresh token must short-circuit lockedRefresh even on the forced path:
+// ForceRefresh on a Shopify-style offline token (no expiry, no refresh token)
+// must return the entry as-is, never invoke the exchange, and never drive a
+// permanent-refresh revocation.
+func TestLockedRefresh_NoRefreshShortCircuits(t *testing.T) {
+	tokens := newFakeTokenStore()
+	tokens.entries[*testTokenKey()] = &TokenEntry{
+		AccessToken: "offline-at", RefreshPolicy: RefreshPolicyNoRefresh, State: SessionActive,
+	}
+	locks := &fakeLocker{}
+
+	got, err := lockedRefresh(context.Background(), tokens, locks, failRefresh(t), testTokenKey(), true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.AccessToken != "offline-at" || got.State != SessionActive {
+		t.Errorf("NoRefresh token must be returned unchanged, got %+v", got)
+	}
+	if tokens.updateCalls != 0 {
+		t.Errorf("NoRefresh token must not be persisted/refreshed, got %d updates", tokens.updateCalls)
+	}
+}
+
 // --- refresh exchange + error classification ---
 
 func TestRefreshTokenExchange_Success(t *testing.T) {
@@ -651,6 +674,67 @@ func TestRefreshTokenExchange_NoRefreshTokenIsPermanent(t *testing.T) {
 	_, err := refreshTokenExchange(context.Background(), do, servers, clients, testTokenKey(), prev)
 	if !errors.Is(err, errPermanentRefresh) {
 		t.Fatalf("a missing refresh token must be a permanent failure, got %v", err)
+	}
+}
+
+// A NoRefresh entry must short-circuit the exchange: it returns the entry as-is
+// with no error and never touches the network. Regression test for Shopify-style
+// offline tokens (no expiry, no refresh token) being wrongly revoked.
+func TestRefreshTokenExchange_NoRefreshPolicyReturnsEntry(t *testing.T) {
+	servers := newFakeServerCache()
+	clients := newFakeClientStore()
+	do := func(req *http.Request) (*http.Response, error) {
+		t.Fatalf("a NoRefresh token must not hit the network: %s", req.URL)
+		return nil, nil
+	}
+	entry := &TokenEntry{AccessToken: "offline-at", RefreshPolicy: RefreshPolicyNoRefresh, State: SessionActive}
+	got, err := refreshTokenExchange(context.Background(), do, servers, clients, testTokenKey(), entry)
+	if err != nil {
+		t.Fatalf("NoRefresh must not be an error, got %v", err)
+	}
+	if got != entry {
+		t.Errorf("NoRefresh must return the entry unchanged")
+	}
+}
+
+// A Refreshable entry whose refresh token is empty is a genuine permanent
+// failure: the policy promised refreshability but the token is gone, so only a
+// fresh authorization can restore the session.
+func TestRefreshTokenExchange_RefreshableEmptyTokenIsPermanent(t *testing.T) {
+	servers := newFakeServerCache()
+	clients := newFakeClientStore()
+	do := func(req *http.Request) (*http.Response, error) {
+		t.Fatalf("must not call the network without a refresh token: %s", req.URL)
+		return nil, nil
+	}
+	entry := &TokenEntry{AccessToken: "old", RefreshPolicy: RefreshPolicyRefreshable, State: SessionActive} // no RefreshToken
+	_, err := refreshTokenExchange(context.Background(), do, servers, clients, testTokenKey(), entry)
+	if !errors.Is(err, errPermanentRefresh) {
+		t.Fatalf("Refreshable + empty token must be permanent, got %v", err)
+	}
+}
+
+// refreshedTokenEntry must capture refresh capability without ever downgrading
+// it: a response carrying a refresh token sets Refreshable; one that omits it
+// keeps the prior policy (RFC 6749 §6 — the existing refresh token stays valid).
+func TestRefreshedTokenEntry_RefreshPolicy(t *testing.T) {
+	// omitted refresh_token must NOT downgrade a Refreshable entry
+	prev := &TokenEntry{
+		AccessToken: "old", RefreshToken: "rt-keep",
+		RefreshPolicy: RefreshPolicyRefreshable, State: SessionActive,
+	}
+	kept := refreshedTokenEntry(prev, &tokenResponse{AccessToken: "at-new"}, time.Now())
+	if kept.RefreshPolicy != RefreshPolicyRefreshable {
+		t.Errorf("RefreshPolicy = %d, want Refreshable retained on omitted refresh_token", kept.RefreshPolicy)
+	}
+	if kept.RefreshToken != "rt-keep" {
+		t.Errorf("prior refresh token must be retained, got %q", kept.RefreshToken)
+	}
+
+	// a response carrying a refresh_token sets Refreshable explicitly
+	got := refreshedTokenEntry(&TokenEntry{State: SessionActive}, &tokenResponse{AccessToken: "at", RefreshToken: "rt-new"}, time.Now())
+	if got.RefreshPolicy != RefreshPolicyRefreshable {
+		t.Errorf("RefreshPolicy = %d, want Refreshable when the response carries a refresh token", got.RefreshPolicy)
 	}
 }
 
