@@ -13,19 +13,61 @@ import (
 	"github.com/go-core-stack/core/utils"
 )
 
-// SessionState captures the lifecycle state of a stored token.
-type SessionState string
+// SessionState captures the lifecycle state of a stored token. It is an
+// int-based enum: storage-efficient and robust to compare. SessionActive is
+// the zero value and the correct default for a freshly issued token.
+type SessionState int
 
 const (
 	// SessionActive indicates the token is valid and usable.
-	SessionActive SessionState = "active"
+	SessionActive SessionState = iota // 0
 	// SessionExpired indicates the token expired and a refresh is needed.
-	SessionExpired SessionState = "expired"
+	SessionExpired // 1
 	// SessionRevoked indicates the token was explicitly revoked or refresh
 	// failed permanently; re-authorization is required.
-	SessionRevoked SessionState = "revoked"
+	SessionRevoked // 2
 	// SessionFailed indicates a transient refresh failure that is retryable.
-	SessionFailed SessionState = "failed"
+	SessionFailed // 3
+)
+
+// ClientType distinguishes a public OAuth client (no secret) from a
+// confidential one (authenticates with a secret). ClientTypePublic is the zero
+// value.
+type ClientType int
+
+const (
+	// ClientTypePublic is a public client with no client secret.
+	ClientTypePublic ClientType = iota // 0
+	// ClientTypeConfidential is a confidential client that authenticates with
+	// a client secret.
+	ClientTypeConfidential // 1
+)
+
+// RegistrationType records how a client was provisioned: via RFC 7591 dynamic
+// registration or pre-provisioned statically by the consumer.
+// RegistrationTypeDynamic is the zero value.
+type RegistrationType int
+
+const (
+	// RegistrationTypeDynamic is a client created via RFC 7591 dynamic
+	// registration.
+	RegistrationTypeDynamic RegistrationType = iota // 0
+	// RegistrationTypeStatic is a consumer-pre-provisioned client.
+	RegistrationTypeStatic // 1
+)
+
+// RefreshPolicy records whether a stored token may be silently refreshed.
+// RefreshPolicyRefreshable is the zero value. The TokenEntry.RefreshPolicy
+// field and the set/check logic that consumes it land in AUTH-0017; this type
+// is only defined here.
+type RefreshPolicy int
+
+const (
+	// RefreshPolicyRefreshable allows the token to be proactively refreshed.
+	RefreshPolicyRefreshable RefreshPolicy = iota // 0
+	// RefreshPolicyNoRefresh marks a token that must not be auto-refreshed
+	// (e.g. an offline token that should not be revoked on near-expiry).
+	RefreshPolicyNoRefresh // 1
 )
 
 // --- servers ---
@@ -69,16 +111,16 @@ type ClientKey struct {
 // fields (ClientSecret, RegistrationAccessToken) are encrypted at rest via the
 // custom BSON marshalers in encryption.go.
 type ClientEntry struct {
-	ClientID                string   `bson:"clientId"`
-	ClientSecret            string   `bson:"clientSecret,omitempty"` // encrypted at rest
-	ClientSecretExpiresAt   int64    `bson:"clientSecretExpiresAt,omitempty"`
-	RegistrationURI         string   `bson:"registrationClientUri,omitempty"`   // RFC 7592
-	RegistrationAccessToken string   `bson:"registrationAccessToken,omitempty"` // encrypted at rest
-	RedirectURIs            []string `bson:"redirectUris,omitempty"`
-	Scopes                  []string `bson:"scopes,omitempty"`
-	ClientType              string   `bson:"clientType"`       // "public" | "confidential"
-	RegistrationType        string   `bson:"registrationType"` // "dynamic" | "static"
-	RegisteredAt            int64    `bson:"registeredAt,omitempty"`
+	ClientID                string           `bson:"clientId"`
+	ClientSecret            string           `bson:"clientSecret,omitempty"` // encrypted at rest
+	ClientSecretExpiresAt   int64            `bson:"clientSecretExpiresAt,omitempty"`
+	RegistrationURI         string           `bson:"registrationClientUri,omitempty"`   // RFC 7592
+	RegistrationAccessToken string           `bson:"registrationAccessToken,omitempty"` // encrypted at rest
+	RedirectURIs            []string         `bson:"redirectUris,omitempty"`
+	Scopes                  []string         `bson:"scopes,omitempty"`
+	ClientType              ClientType       `bson:"clientType"`
+	RegistrationType        RegistrationType `bson:"registrationType"`
+	RegisteredAt            int64            `bson:"registeredAt,omitempty"`
 }
 
 // --- tokens ---

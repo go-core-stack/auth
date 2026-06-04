@@ -16,12 +16,8 @@ import (
 	coresync "github.com/go-core-stack/core/sync"
 )
 
-// ClientType / RegistrationType values persisted on ClientEntry.
 const (
-	clientTypePublic        = "public"
-	registrationTypeDynamic = "dynamic"
-	registrationTypeStatic  = "static"
-	responseTypeCode        = "code"
+	responseTypeCode = "code"
 )
 
 // clientStore is the subset of the client table that registration needs. The
@@ -239,8 +235,8 @@ func performRegistration(ctx context.Context, do httpDoFunc, clients clientStore
 		RegistrationAccessToken: resp.RegistrationAccessToken,
 		RedirectURIs:            preferStrings(resp.RedirectURIs, merged.RedirectURIs),
 		Scopes:                  preferStrings(strings.Fields(resp.Scope), merged.Scopes),
-		ClientType:              clientTypePublic,
-		RegistrationType:        registrationTypeDynamic,
+		ClientType:              ClientTypePublic,
+		RegistrationType:        RegistrationTypeDynamic,
 		RegisteredAt:            time.Now().Unix(),
 	}
 
@@ -268,7 +264,7 @@ func registerStaticClient(ctx context.Context, clients clientStore, serverURL, c
 		return errors.Wrap(errors.InvalidArgument, "oauth: serverURL must not be empty")
 	}
 
-	entry.RegistrationType = registrationTypeStatic
+	entry.RegistrationType = RegistrationTypeStatic
 	entry.RegisteredAt = time.Now().Unix()
 
 	// Upsert so a static client can be re-provisioned (e.g. rotated secret)

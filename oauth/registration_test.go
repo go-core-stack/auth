@@ -192,11 +192,11 @@ func TestRegisterDynamicClient_HappyPath(t *testing.T) {
 	if entry.RegistrationAccessToken != "rat-123" {
 		t.Errorf("registration access token = %q", entry.RegistrationAccessToken)
 	}
-	if entry.ClientType != clientTypePublic {
-		t.Errorf("client type = %q, want %q", entry.ClientType, clientTypePublic)
+	if entry.ClientType != ClientTypePublic {
+		t.Errorf("client type = %d, want %d", entry.ClientType, ClientTypePublic)
 	}
-	if entry.RegistrationType != registrationTypeDynamic {
-		t.Errorf("registration type = %q, want %q", entry.RegistrationType, registrationTypeDynamic)
+	if entry.RegistrationType != RegistrationTypeDynamic {
+		t.Errorf("registration type = %d, want %d", entry.RegistrationType, RegistrationTypeDynamic)
 	}
 	if entry.RegisteredAt == 0 {
 		t.Error("RegisteredAt should be set")
@@ -607,7 +607,7 @@ func TestRegisterStaticClient_SetsMetadataAndUpserts(t *testing.T) {
 
 	// trailing slash exercises normalization on the write path
 	err := registerStaticClient(context.Background(), clients, "https://api.example.com/", "tenant-a",
-		ClientEntry{ClientID: "static-id", ClientSecret: "shh", ClientType: "confidential"})
+		ClientEntry{ClientID: "static-id", ClientSecret: "shh", ClientType: ClientTypeConfidential})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -616,14 +616,14 @@ func TestRegisterStaticClient_SetsMetadataAndUpserts(t *testing.T) {
 	if stored == nil {
 		t.Fatalf("client not persisted under normalized (server, clientRef) key; keys=%v", clients.entries)
 	}
-	if stored.RegistrationType != registrationTypeStatic {
-		t.Errorf("registration type = %q, want %q", stored.RegistrationType, registrationTypeStatic)
+	if stored.RegistrationType != RegistrationTypeStatic {
+		t.Errorf("registration type = %d, want %d", stored.RegistrationType, RegistrationTypeStatic)
 	}
 	if stored.RegisteredAt == 0 {
 		t.Error("RegisteredAt should be set")
 	}
-	if stored.ClientType != "confidential" {
-		t.Errorf("ClientType = %q, want consumer-supplied %q", stored.ClientType, "confidential")
+	if stored.ClientType != ClientTypeConfidential {
+		t.Errorf("ClientType = %d, want consumer-supplied %d", stored.ClientType, ClientTypeConfidential)
 	}
 	if stored.ClientID != "static-id" || stored.ClientSecret != "shh" {
 		t.Errorf("consumer-supplied credentials not preserved: %+v", stored)
@@ -631,7 +631,7 @@ func TestRegisterStaticClient_SetsMetadataAndUpserts(t *testing.T) {
 
 	// Locate is an upsert: re-registering the same ref must not error.
 	if err := registerStaticClient(context.Background(), clients, "https://api.example.com", "tenant-a",
-		ClientEntry{ClientID: "rotated", ClientSecret: "shh2", ClientType: "confidential"}); err != nil {
+		ClientEntry{ClientID: "rotated", ClientSecret: "shh2", ClientType: ClientTypeConfidential}); err != nil {
 		t.Fatalf("re-provisioning a static client must succeed: %v", err)
 	}
 	if got := clients.entries[ckey("https://api.example.com", "tenant-a")]; got == nil || got.ClientID != "rotated" {
@@ -646,11 +646,11 @@ func TestRegisterStaticClient_TwoTenantsSameServer(t *testing.T) {
 	const server = "https://api.example.com"
 
 	if err := registerStaticClient(context.Background(), clients, server, "tenant-a",
-		ClientEntry{ClientID: "id-a", ClientType: "confidential"}); err != nil {
+		ClientEntry{ClientID: "id-a", ClientType: ClientTypeConfidential}); err != nil {
 		t.Fatalf("tenant-a registration failed: %v", err)
 	}
 	if err := registerStaticClient(context.Background(), clients, server, "tenant-b",
-		ClientEntry{ClientID: "id-b", ClientType: "confidential"}); err != nil {
+		ClientEntry{ClientID: "id-b", ClientType: ClientTypeConfidential}); err != nil {
 		t.Fatalf("tenant-b registration failed: %v", err)
 	}
 
@@ -684,7 +684,7 @@ func TestRegisterStaticClient_CoexistsWithDynamic(t *testing.T) {
 
 	// Static client for the same server under a distinct clientRef.
 	if err := registerStaticClient(context.Background(), clients, server, "tenant-a",
-		ClientEntry{ClientID: "static-id", ClientType: "confidential"}); err != nil {
+		ClientEntry{ClientID: "static-id", ClientType: ClientTypeConfidential}); err != nil {
 		t.Fatalf("static registration failed: %v", err)
 	}
 
@@ -692,15 +692,15 @@ func TestRegisterStaticClient_CoexistsWithDynamic(t *testing.T) {
 	if err != nil || gotDyn == nil || gotDyn.ClientID != dyn.ClientID {
 		t.Errorf("dynamic client clobbered: got %v err=%v, want %q", gotDyn, err, dyn.ClientID)
 	}
-	if gotDyn.RegistrationType != registrationTypeDynamic {
-		t.Errorf("dynamic slot type = %q, want %q", gotDyn.RegistrationType, registrationTypeDynamic)
+	if gotDyn.RegistrationType != RegistrationTypeDynamic {
+		t.Errorf("dynamic slot type = %d, want %d", gotDyn.RegistrationType, RegistrationTypeDynamic)
 	}
 	gotStatic, err := getClient(context.Background(), clients, server, "tenant-a")
 	if err != nil || gotStatic == nil || gotStatic.ClientID != "static-id" {
 		t.Errorf("static client lookup = %v err=%v, want static-id", gotStatic, err)
 	}
-	if gotStatic.RegistrationType != registrationTypeStatic {
-		t.Errorf("static slot type = %q, want %q", gotStatic.RegistrationType, registrationTypeStatic)
+	if gotStatic.RegistrationType != RegistrationTypeStatic {
+		t.Errorf("static slot type = %d, want %d", gotStatic.RegistrationType, RegistrationTypeStatic)
 	}
 }
 

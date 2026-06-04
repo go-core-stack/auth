@@ -85,8 +85,8 @@ func TestClientEntryEncryptionRoundTrip(t *testing.T) {
 		ClientID:                "client-123",
 		ClientSecret:            "super-secret-client-secret",
 		RegistrationAccessToken: "super-secret-registration-token",
-		ClientType:              "public",
-		RegistrationType:        "dynamic",
+		ClientType:              ClientTypeConfidential,
+		RegistrationType:        RegistrationTypeStatic,
 	}
 
 	data, err := bson.Marshal(orig)
@@ -117,6 +117,13 @@ func TestClientEntryEncryptionRoundTrip(t *testing.T) {
 	}
 	if got.ClientID != orig.ClientID {
 		t.Errorf("clientId: got %q, want %q", got.ClientID, orig.ClientID)
+	}
+	// Int-enum fields survive the round-trip unchanged.
+	if got.ClientType != orig.ClientType {
+		t.Errorf("clientType: got %d, want %d", got.ClientType, orig.ClientType)
+	}
+	if got.RegistrationType != orig.RegistrationType {
+		t.Errorf("registrationType: got %d, want %d", got.RegistrationType, orig.RegistrationType)
 	}
 }
 
