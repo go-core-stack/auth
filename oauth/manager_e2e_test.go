@@ -203,7 +203,7 @@ func TestEndToEndFlow(t *testing.T) {
 
 	// 5a. GetToken — a healthy (1h) token is returned without a network call or
 	// refresh-lock acquisition.
-	got, err := getToken(ctx, tokens, refLocks, refresh, srvURL, accountID)
+	got, err := getToken(ctx, tokens, refLocks, refresh, srvURL, "", accountID)
 	if err != nil {
 		t.Fatalf("get token: %v", err)
 	}
@@ -215,7 +215,7 @@ func TestEndToEndFlow(t *testing.T) {
 	}
 
 	// 5b. RefreshToken — forced refresh via the refresh-token grant.
-	refreshed, err := forceRefresh(ctx, tokens, refLocks, refresh, srvURL, accountID)
+	refreshed, err := forceRefresh(ctx, tokens, refLocks, refresh, srvURL, "", accountID)
 	if err != nil {
 		t.Fatalf("forced refresh: %v", err)
 	}
@@ -230,7 +230,7 @@ func TestEndToEndFlow(t *testing.T) {
 	}
 
 	// 6. Revoke — RFC 7009 at the server, local session marked revoked.
-	if err := revokeToken(ctx, tokens, do, servers, clients, srvURL, accountID); err != nil {
+	if err := revokeToken(ctx, tokens, do, servers, clients, srvURL, "", accountID); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
 	if revokedToken != "refresh-2" || revokedHint != tokenTypeHintRefresh {
@@ -238,14 +238,14 @@ func TestEndToEndFlow(t *testing.T) {
 	}
 
 	// 7. Session state + listing reflect the revoked, still-stored token.
-	state, err := getSessionState(ctx, tokens, srvURL, accountID)
+	state, err := getSessionState(ctx, tokens, srvURL, "", accountID)
 	if err != nil {
 		t.Fatalf("session state: %v", err)
 	}
 	if state != SessionRevoked {
 		t.Errorf("session state = %q, want revoked", state)
 	}
-	list, err := listTokens(ctx, tokens, srvURL)
+	list, err := listTokens(ctx, tokens, srvURL, "")
 	if err != nil {
 		t.Fatalf("list tokens: %v", err)
 	}
