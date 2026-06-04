@@ -773,6 +773,211 @@ func TestRegisterStaticClient_CoexistsWithDynamic(t *testing.T) {
 	}
 }
 
+// --- DeleteClient (cascade) ---
+
+// DeleteClient removes the client record and cascade-deletes every token issued
+// for that (server, clientRef).
+func TestDeleteClient_CascadeDeletesTokensAndClient(t *testing.T) {
+	const server = "https://api.example.com"
+	clients := newFakeClientStore()
+	if err := registerStaticClient(context.Background(), clients, server, "tenant-a",
+		ClientEntry{ClientID: "id-a", ClientSecret: "shh"}); err != nil {
+		t.Fatalf("setup: static registration failed: %v", err)
+	}
+	tokens := newFakeTokenStore()
+	for _, acct := range []string{"acct-1", "acct-2", "acct-3"} {
+		tokens.entries[TokenKey{ServerURL: server, ClientRef: "tenant-a", AccountID: acct}] =
+			&TokenEntry{AccessToken: "at-" + acct}
+	}
+	locks := &fakeRegistrationLocks{}
+
+	// trailing slash exercises normalization on the delete path
+	if err := deleteClient(context.Background(), clients, tokens, locks, server+"/", "tenant-a"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if tokens.filterDeletes != 1 {
+		t.Errorf("expected exactly 1 cascade DeleteByFilter, got %d", tokens.filterDeletes)
+	}
+	if len(tokens.entries) != 0 {
+		t.Errorf("expected all tenant-a tokens deleted, %d remain: %v", len(tokens.entries), tokens.entries)
+	}
+	if _, ok := clients.entries[ckey(server, "tenant-a")]; ok {
+		t.Errorf("client record not deleted; entries=%v", clients.entries)
+	}
+	if clients.deletes != 1 {
+		t.Errorf("expected exactly 1 client DeleteKey, got %d", clients.deletes)
+	}
+	// The registration lock must be acquired exactly once and released.
+	if locks.acquires != 1 || !locks.released() {
+		t.Errorf("lock acquires=%d released=%v, want 1/true", locks.acquires, locks.released())
+	}
+}
+
+// An empty clientRef is rejected: the dynamic slot cannot be deleted via this
+// API, and nothing is deleted.
+func TestDeleteClient_EmptyClientRefRejected(t *testing.T) {
+	clients := newFakeClientStore()
+	tokens := newFakeTokenStore()
+	locks := &fakeRegistrationLocks{}
+
+	err := deleteClient(context.Background(), clients, tokens, locks, "https://api.example.com", "")
+	if err == nil {
+		t.Fatal("expected an error when clientRef is empty")
+	}
+	if !errors.IsInvalidArgument(err) {
+		t.Errorf("expected InvalidArgument, got %v", err)
+	}
+	if tokens.filterDeletes != 0 || clients.deletes != 0 {
+		t.Errorf("must not delete on rejection; cascade=%d clientDeletes=%d", tokens.filterDeletes, clients.deletes)
+	}
+	// Validation must precede locking: an invalid request never takes the lock.
+	if locks.acquires != 0 {
+		t.Errorf("must not acquire the lock on rejection; acquires=%d", locks.acquires)
+	}
+}
+
+// A serverURL that normalizes to empty is rejected, and nothing is deleted.
+func TestDeleteClient_EmptyServerURLRejected(t *testing.T) {
+	clients := newFakeClientStore()
+	tokens := newFakeTokenStore()
+	locks := &fakeRegistrationLocks{}
+
+	err := deleteClient(context.Background(), clients, tokens, locks, "   ", "tenant-a")
+	if err == nil {
+		t.Fatal("expected an error when serverURL normalizes to empty")
+	}
+	if !errors.IsInvalidArgument(err) {
+		t.Errorf("expected InvalidArgument, got %v", err)
+	}
+	if tokens.filterDeletes != 0 || clients.deletes != 0 {
+		t.Errorf("must not delete on rejection; cascade=%d clientDeletes=%d", tokens.filterDeletes, clients.deletes)
+	}
+	if locks.acquires != 0 {
+		t.Errorf("must not acquire the lock on rejection; acquires=%d", locks.acquires)
+	}
+}
+
+// Deleting an already-absent client is not an error (idempotent): the NotFound
+// from the client delete is tolerated, and the token cascade still runs.
+func TestDeleteClient_IdempotentWhenClientAbsent(t *testing.T) {
+	clients := newFakeClientStore()
+	tokens := newFakeTokenStore()
+	locks := &fakeRegistrationLocks{}
+
+	if err := deleteClient(context.Background(), clients, tokens, locks, "https://api.example.com", "tenant-a"); err != nil {
+		t.Fatalf("deleting an absent client must be tolerated: %v", err)
+	}
+	if tokens.filterDeletes != 1 {
+		t.Errorf("cascade must still run for an absent client; filterDeletes=%d", tokens.filterDeletes)
+	}
+	if !locks.released() {
+		t.Error("lock must be released even on the idempotent (absent client) path")
+	}
+}
+
+// Deleting one tenant must leave another tenant's tokens and the dynamic slot's
+// tokens for the same server untouched.
+func TestDeleteClient_IsolatesOtherClients(t *testing.T) {
+	const server = "https://api.example.com"
+	clients := newFakeClientStore()
+	if err := registerStaticClient(context.Background(), clients, server, "tenant-a",
+		ClientEntry{ClientID: "id-a", ClientSecret: "shh"}); err != nil {
+		t.Fatalf("setup: tenant-a registration failed: %v", err)
+	}
+	if err := registerStaticClient(context.Background(), clients, server, "tenant-b",
+		ClientEntry{ClientID: "id-b", ClientSecret: "shh"}); err != nil {
+		t.Fatalf("setup: tenant-b registration failed: %v", err)
+	}
+
+	tokens := newFakeTokenStore()
+	tokens.entries[TokenKey{ServerURL: server, ClientRef: "tenant-a", AccountID: "acct-1"}] = &TokenEntry{AccessToken: "a"}
+	tokens.entries[TokenKey{ServerURL: server, ClientRef: "tenant-b", AccountID: "acct-1"}] = &TokenEntry{AccessToken: "b"}
+	// dynamic slot ("") token for the same server
+	tokens.entries[TokenKey{ServerURL: server, ClientRef: "", AccountID: "acct-1"}] = &TokenEntry{AccessToken: "d"}
+	locks := &fakeRegistrationLocks{}
+
+	if err := deleteClient(context.Background(), clients, tokens, locks, server, "tenant-a"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if _, ok := tokens.entries[(TokenKey{ServerURL: server, ClientRef: "tenant-a", AccountID: "acct-1"})]; ok {
+		t.Error("tenant-a token should have been deleted")
+	}
+	if _, ok := tokens.entries[(TokenKey{ServerURL: server, ClientRef: "tenant-b", AccountID: "acct-1"})]; !ok {
+		t.Error("tenant-b token must be untouched")
+	}
+	if _, ok := tokens.entries[(TokenKey{ServerURL: server, ClientRef: "", AccountID: "acct-1"})]; !ok {
+		t.Error("dynamic-slot token must be untouched")
+	}
+	// The tenant-b client record must also survive.
+	if _, ok := clients.entries[ckey(server, "tenant-b")]; !ok {
+		t.Error("tenant-b client record must be untouched")
+	}
+}
+
+// A failure in the token cascade aborts before the client record is deleted, so
+// no orphaned tokens are left pointing at a removed client. The error is wrapped
+// with the cascade's error code.
+func TestDeleteClient_CascadeFailureAbortsBeforeClientDelete(t *testing.T) {
+	const server = "https://api.example.com"
+	clients := newFakeClientStore()
+	if err := registerStaticClient(context.Background(), clients, server, "tenant-a",
+		ClientEntry{ClientID: "id-a", ClientSecret: "shh"}); err != nil {
+		t.Fatalf("setup: static registration failed: %v", err)
+	}
+	tokens := newFakeTokenStore()
+	tokens.filterDeleteErr = errors.Wrap(errors.Unknown, "boom")
+	locks := &fakeRegistrationLocks{}
+
+	err := deleteClient(context.Background(), clients, tokens, locks, server, "tenant-a")
+	if err == nil {
+		t.Fatal("expected an error when the token cascade fails")
+	}
+	if clients.deletes != 0 {
+		t.Errorf("client record must NOT be deleted when the cascade fails; deletes=%d", clients.deletes)
+	}
+	if _, ok := clients.entries[ckey(server, "tenant-a")]; !ok {
+		t.Error("client record must survive a cascade failure")
+	}
+	// The lock is taken before the cascade, so it must still be released on the
+	// cascade-failure path.
+	if !locks.released() {
+		t.Error("lock must be released even when the cascade fails")
+	}
+}
+
+// Lock contention must surface a retryable error and delete nothing: deleting
+// while a (re-)registration of the same client is in flight would race.
+func TestDeleteClient_LockContentionFailsRetryable(t *testing.T) {
+	const server = "https://api.example.com"
+	clients := newFakeClientStore()
+	if err := registerStaticClient(context.Background(), clients, server, "tenant-a",
+		ClientEntry{ClientID: "id-a", ClientSecret: "shh"}); err != nil {
+		t.Fatalf("setup: static registration failed: %v", err)
+	}
+	tokens := newFakeTokenStore()
+	tokens.entries[TokenKey{ServerURL: server, ClientRef: "tenant-a", AccountID: "acct-1"}] = &TokenEntry{AccessToken: "a"}
+	locks := &fakeRegistrationLocks{failWith: errors.Wrap(errors.AlreadyExists, "lock held")}
+
+	err := deleteClient(context.Background(), clients, tokens, locks, server, "tenant-a")
+	if err == nil {
+		t.Fatal("expected a retryable error on lock contention")
+	}
+	if errors.GetErrCode(err) != errors.AlreadyExists {
+		t.Errorf("expected a retryable (AlreadyExists) error on lock contention, got %v", err)
+	}
+	if tokens.filterDeletes != 0 {
+		t.Errorf("must not cascade-delete tokens when the lock is held; filterDeletes=%d", tokens.filterDeletes)
+	}
+	if clients.deletes != 0 {
+		t.Errorf("must not delete the client record when the lock is held; deletes=%d", clients.deletes)
+	}
+	if _, ok := tokens.entries[(TokenKey{ServerURL: server, ClientRef: "tenant-a", AccountID: "acct-1"})]; !ok {
+		t.Error("tenant-a token must survive a contended delete")
+	}
+}
+
 func TestMergeRegisterOptions_DefaultsAndOverrides(t *testing.T) {
 	cfg := testConfig()
 

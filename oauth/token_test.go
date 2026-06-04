@@ -29,6 +29,10 @@ type fakeTokenStore struct {
 	deleteCalls int
 	lastFilter  any
 	deleteErr   error
+	// filterDeletes counts DeleteByFilter calls and filterDeleteErr, when set,
+	// makes DeleteByFilter fail — distinct from the point-delete deleteErr above.
+	filterDeletes   int
+	filterDeleteErr error
 }
 
 func newFakeTokenStore() *fakeTokenStore {
@@ -112,6 +116,42 @@ func (f *fakeTokenStore) FindMany(_ context.Context, filter any, _, _ int32) ([]
 		out = append(out, &cp)
 	}
 	return out, nil
+}
+
+// DeleteByFilter removes every entry matching the {_id.serverUrl, _id.clientRef}
+// equality filter the client-deletion cascade builds, returning the number
+// deleted. It satisfies the tokenDeleter interface used by deleteClient; the
+// matching mirrors FindMany's so the two stay consistent. The cascade only ever
+// passes a non-empty clientRef as a plain string, so only string equality is
+// modeled here.
+func (f *fakeTokenStore) DeleteByFilter(_ context.Context, filter any) (int64, error) {
+	f.filterDeletes++
+	f.lastFilter = filter
+	if f.filterDeleteErr != nil {
+		return 0, f.filterDeleteErr
+	}
+	want, byServer := "", false
+	matchRef := func(string) bool { return true }
+	if m, ok := filter.(bson.M); ok {
+		if s, ok := m["_id.serverUrl"].(string); ok {
+			want, byServer = s, true
+		}
+		if v, ok := m["_id.clientRef"].(string); ok {
+			matchRef = func(ref string) bool { return ref == v }
+		}
+	}
+	var deleted int64
+	for k := range f.entries {
+		if byServer && k.ServerURL != want {
+			continue
+		}
+		if !matchRef(k.ClientRef) {
+			continue
+		}
+		delete(f.entries, k)
+		deleted++
+	}
+	return deleted, nil
 }
 
 // jsonStatusResponse builds a JSON HTTP response with an explicit status code.
