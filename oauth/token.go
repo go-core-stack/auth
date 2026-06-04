@@ -205,7 +205,7 @@ func lockedRefresh(ctx context.Context, tokens tokenStore, locks refreshLockerAP
 		}
 		entry.ErrorReason = err.Error()
 		if uerr := tokens.Update(ctx, key, entry); uerr != nil {
-			log.Printf("oauth: failed to persist %s state for %s after refresh failure: %s",
+			log.Printf("oauth: failed to persist state %d for %s after refresh failure: %s",
 				entry.State, key.id(), uerr)
 		}
 		return nil, err
@@ -410,14 +410,15 @@ func deleteToken(ctx context.Context, tokens tokenStore, serverURL, clientRef, a
 func getSessionState(ctx context.Context, tokens tokenStore, serverURL, clientRef, accountID string) (SessionState, error) {
 	key, err := tokenKeyFor(serverURL, clientRef, accountID)
 	if err != nil {
-		return "", err
+		// State is meaningless on the error path; callers must check err first.
+		return 0, err
 	}
 	entry, err := tokens.Find(ctx, key)
 	if err != nil {
 		if errors.IsNotFound(err) {
-			return "", errors.Wrapf(errors.NotFound, "oauth: no token for %s", key.id())
+			return 0, errors.Wrapf(errors.NotFound, "oauth: no token for %s", key.id())
 		}
-		return "", err
+		return 0, err
 	}
 	return entry.State, nil
 }
