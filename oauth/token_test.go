@@ -75,13 +75,29 @@ func (f *fakeTokenStore) Locate(ctx context.Context, key *TokenKey, entry *Token
 func (f *fakeTokenStore) FindMany(_ context.Context, filter any, _, _ int32) ([]*TokenEntry, error) {
 	f.lastFilter = filter
 	want, byServer := "", false
-	wantRef, byRef := "", false
+	matchRef := func(string) bool { return true }
 	if m, ok := filter.(bson.M); ok {
 		if s, ok := m["_id.serverUrl"].(string); ok {
 			want, byServer = s, true
 		}
-		if s, ok := m["_id.clientRef"].(string); ok {
-			wantRef, byRef = s, true
+		switch v := m["_id.clientRef"].(type) {
+		case string:
+			// non-empty clientRef → plain equality
+			matchRef = func(ref string) bool { return ref == v }
+		case bson.M:
+			// dynamic "" → $in:["",nil] matching absent-or-empty clientRef
+			in, _ := v["$in"].(bson.A)
+			matchRef = func(ref string) bool {
+				for _, w := range in {
+					if w == nil && ref == "" {
+						return true
+					}
+					if s, ok := w.(string); ok && s == ref {
+						return true
+					}
+				}
+				return false
+			}
 		}
 	}
 	var out []*TokenEntry
@@ -89,7 +105,7 @@ func (f *fakeTokenStore) FindMany(_ context.Context, filter any, _, _ int32) ([]
 		if byServer && k.ServerURL != want {
 			continue
 		}
-		if byRef && k.ClientRef != wantRef {
+		if !matchRef(k.ClientRef) {
 			continue
 		}
 		cp := *e
@@ -815,5 +831,37 @@ func TestListTokens_ByClientRef(t *testing.T) {
 	}
 	if m, ok := tokens.lastFilter.(bson.M); !ok || m["_id.clientRef"] != "tenant-a" {
 		t.Errorf("expected a clientRef filter, got %v", tokens.lastFilter)
+	}
+}
+
+// ListTokens("") lists only dynamic tokens. Dynamic documents omit clientRef
+// entirely (omitempty), so the filter must match absent-or-empty via
+// $in:["",nil] — a naive {"_id.clientRef": ""} would miss them in MongoDB.
+func TestListTokens_DynamicMatchesAbsentOrEmpty(t *testing.T) {
+	tokens := newFakeTokenStore()
+	tokens.entries[TokenKey{ServerURL: "https://api.example.com", AccountID: "a"}] = &TokenEntry{AccessToken: "dyn"}
+	tokens.entries[TokenKey{ServerURL: "https://api.example.com", ClientRef: "tenant-a", AccountID: "b"}] = &TokenEntry{AccessToken: "ta"}
+	tokens.entries[TokenKey{ServerURL: "https://api.example.com", ClientRef: "tenant-b", AccountID: "c"}] = &TokenEntry{AccessToken: "tb"}
+
+	list, err := listTokens(context.Background(), tokens, "https://api.example.com", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(list) != 1 || list[0].AccessToken != "dyn" {
+		t.Errorf("ListTokens(\"\") = %+v, want only the dynamic token", list)
+	}
+	m, ok := tokens.lastFilter.(bson.M)
+	if !ok {
+		t.Fatalf("expected a bson.M filter, got %T", tokens.lastFilter)
+	}
+	// The dynamic clientRef filter must be an absent-or-empty match, not a naive
+	// equality (which would skip documents that omit the field entirely).
+	sub, ok := m["_id.clientRef"].(bson.M)
+	if !ok {
+		t.Fatalf("dynamic clientRef filter must be a sub-document ($in), got %T: %v", m["_id.clientRef"], m["_id.clientRef"])
+	}
+	in, ok := sub["$in"].(bson.A)
+	if !ok || len(in) != 2 {
+		t.Errorf("expected $in:[\"\",nil], got %v", sub)
 	}
 }

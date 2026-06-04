@@ -212,6 +212,45 @@ func TestTokenReconciler_NearExpiryRefreshSuccess(t *testing.T) {
 	if fl.lock == nil || !fl.lock.closed {
 		t.Errorf("refresh lock should be acquired and released")
 	}
+	// A dynamic token (no ClientRef) must lock under the dynamic slot.
+	if fl.lastKey == nil || fl.lastKey.ClientRef != "" {
+		t.Errorf("dynamic token lock key must carry empty ClientRef, got %+v", fl.lastKey)
+	}
+}
+
+// A token stored under a non-empty ClientRef must refresh against that client:
+// the reconciler sources ClientRef from the token key into the refresh lock key,
+// and the refresh func receives the ClientRef-carrying key (which threads into
+// findClient, so a static client refreshes against its own registration and not
+// the dynamic slot).
+func TestTokenReconciler_RefreshThreadsClientRef(t *testing.T) {
+	key := &TokenKey{ServerURL: "https://example.com", ClientRef: "tenant-a", AccountID: "user-1"}
+	ft := newFakeTokenTable()
+	ft.entries[*key] = &TokenEntry{State: SessionActive, ExpiresAt: time.Now().Add(time.Minute).Unix()}
+	fl := &fakeLocker{}
+
+	var gotKey *TokenKey
+	r := &tokenRefreshReconciler{
+		tokens: ft,
+		locks:  fl,
+		refresh: func(_ context.Context, k *TokenKey, _ *TokenEntry) (*TokenEntry, error) {
+			gotKey = k
+			return &TokenEntry{State: SessionActive, AccessToken: "new", ExpiresAt: time.Now().Add(time.Hour).Unix()}, nil
+		},
+	}
+
+	if _, err := r.Reconcile(key); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if fl.lastKey == nil || fl.lastKey.ClientRef != "tenant-a" {
+		t.Errorf("refresh lock key ClientRef = %+v, want tenant-a", fl.lastKey)
+	}
+	if fl.lastKey.ServerURL != "https://example.com" || fl.lastKey.AccountID != "user-1" {
+		t.Errorf("lock key = %+v, want server/account preserved", fl.lastKey)
+	}
+	if gotKey == nil || gotKey.ClientRef != "tenant-a" {
+		t.Errorf("refresh received key %+v, want ClientRef tenant-a (threads into findClient)", gotKey)
+	}
 }
 
 func TestTokenReconciler_PermanentFailureRevokes(t *testing.T) {
