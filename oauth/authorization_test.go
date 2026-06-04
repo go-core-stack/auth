@@ -517,6 +517,79 @@ func TestHandleCallback_ExpiredPendingState(t *testing.T) {
 }
 
 // Scopes fall back to the requested scopes when the server omits them.
+// AuthorizationURL must thread AuthorizeOptions.ClientRef into the persisted
+// PendingAuthState so HandleCallback can rebuild the correct TokenKey, and must
+// resolve the client under the (ServerURL, ClientRef) pair.
+func TestAuthorizationURL_StoresClientRef(t *testing.T) {
+	servers := newFakeServerCache()
+	servers.entries["https://api.example.com"] = authServer()
+	clients := newFakeClientStore()
+	// Static client registered under a non-empty ClientRef.
+	clients.entries[ckey("https://api.example.com", "tenant-a")] = &ClientEntry{ClientID: "client-tenant-a"}
+	pending := newFakePendingStore()
+
+	params, err := authorizationURL(context.Background(), servers, clients, pending, testConfig(),
+		AuthorizeOptions{
+			ServerURL: "https://api.example.com/",
+			ClientRef: "tenant-a",
+			AccountID: "acct-1",
+		})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// The client resolved must be the tenant-a static client, not the dynamic slot.
+	if params.ClientID != "client-tenant-a" {
+		t.Errorf("ClientID = %q, want client-tenant-a (resolved by ClientRef)", params.ClientID)
+	}
+	ps := pending.entries[params.State]
+	if ps == nil {
+		t.Fatalf("pending state not persisted under state %q", params.State)
+	}
+	if ps.ClientRef != "tenant-a" {
+		t.Errorf("pending ClientRef = %q, want tenant-a", ps.ClientRef)
+	}
+}
+
+// End-to-end ClientRef round-trip: an authorize started with ClientRef must
+// produce a token persisted under a TokenKey carrying that same ClientRef.
+func TestHandleCallback_ClientRefRoundTrip(t *testing.T) {
+	servers := newFakeServerCache()
+	servers.entries["https://api.example.com"] = authServer()
+	clients := newFakeClientStore()
+	clients.entries[ckey("https://api.example.com", "tenant-a")] = &ClientEntry{ClientID: "client-tenant-a"}
+	pending := newFakePendingStore()
+	tokens := newFakeTokenWriter()
+
+	params, err := authorizationURL(context.Background(), servers, clients, pending, testConfig(),
+		AuthorizeOptions{
+			ServerURL: "https://api.example.com",
+			ClientRef: "tenant-a",
+			AccountID: "acct-1",
+		})
+	if err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+
+	do := func(_ *http.Request) (*http.Response, error) { return jsonResponse(tokenResp), nil }
+	entry, err := handleCallback(context.Background(), do, servers, pending, tokens, params.State, "auth-code-1")
+	if err != nil {
+		t.Fatalf("callback: %v", err)
+	}
+	if entry.AccessToken != "at-123" {
+		t.Errorf("AccessToken = %q", entry.AccessToken)
+	}
+
+	// The token must be stored under the ClientRef-bearing key, not the dynamic
+	// (ServerURL, "", AccountID) slot.
+	want := TokenKey{ServerURL: "https://api.example.com", ClientRef: "tenant-a", AccountID: "acct-1"}
+	if _, ok := tokens.entries[want]; !ok {
+		t.Errorf("token not persisted under %+v; entries=%v", want, tokens.entries)
+	}
+	if _, ok := tokens.entries[TokenKey{ServerURL: "https://api.example.com", AccountID: "acct-1"}]; ok {
+		t.Error("token must not be stored under the dynamic (empty ClientRef) key")
+	}
+}
+
 func TestNewTokenEntry_ScopeFallback(t *testing.T) {
 	ps := &PendingAuthState{Scopes: []string{"read", "write"}}
 	tr := &tokenResponse{AccessToken: "at", ExpiresIn: 0}

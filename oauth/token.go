@@ -57,8 +57,8 @@ type oauthErrorResponse struct {
 // returned without any network call. A revoked token is returned as-is — refresh
 // cannot resurrect it — so callers should inspect TokenEntry.State (or use
 // GetSessionState) and re-authorize when it is not active.
-func (m *OAuthManager) GetToken(ctx context.Context, serverURL, accountID string) (*TokenEntry, error) {
-	return getToken(ctx, m.tokenTable, m.tokenRefreshLocks, m.refreshToken, serverURL, accountID)
+func (m *OAuthManager) GetToken(ctx context.Context, serverURL, clientRef, accountID string) (*TokenEntry, error) {
+	return getToken(ctx, m.tokenTable, m.tokenRefreshLocks, m.refreshToken, serverURL, clientRef, accountID)
 }
 
 // RefreshToken forces a token refresh regardless of remaining lifetime, under
@@ -66,8 +66,8 @@ func (m *OAuthManager) GetToken(ctx context.Context, serverURL, accountID string
 // refreshed token. A permanent failure (invalid_grant / invalid_client) marks
 // the session revoked and surfaces the error; a transient failure marks it
 // failed (keeping the existing token) and surfaces the error.
-func (m *OAuthManager) RefreshToken(ctx context.Context, serverURL, accountID string) (*TokenEntry, error) {
-	return forceRefresh(ctx, m.tokenTable, m.tokenRefreshLocks, m.refreshToken, serverURL, accountID)
+func (m *OAuthManager) RefreshToken(ctx context.Context, serverURL, clientRef, accountID string) (*TokenEntry, error) {
+	return forceRefresh(ctx, m.tokenTable, m.tokenRefreshLocks, m.refreshToken, serverURL, clientRef, accountID)
 }
 
 // RevokeToken revokes the token at the server's RFC 7009 revocation endpoint and
@@ -75,26 +75,28 @@ func (m *OAuthManager) RefreshToken(ctx context.Context, serverURL, accountID st
 // independent of the server call: even if the server call fails (or no
 // revocation endpoint is advertised) the token is marked revoked locally, and
 // the server error is surfaced to the caller.
-func (m *OAuthManager) RevokeToken(ctx context.Context, serverURL, accountID string) error {
-	return revokeToken(ctx, m.tokenTable, m.httpDo, m.serverTable, m.clientTable, serverURL, accountID)
+func (m *OAuthManager) RevokeToken(ctx context.Context, serverURL, clientRef, accountID string) error {
+	return revokeToken(ctx, m.tokenTable, m.httpDo, m.serverTable, m.clientTable, serverURL, clientRef, accountID)
 }
 
 // DeleteToken removes the stored token for a (server, account) pair. It is
 // idempotent: deleting an absent token is not an error.
-func (m *OAuthManager) DeleteToken(ctx context.Context, serverURL, accountID string) error {
-	return deleteToken(ctx, m.tokenTable, serverURL, accountID)
+func (m *OAuthManager) DeleteToken(ctx context.Context, serverURL, clientRef, accountID string) error {
+	return deleteToken(ctx, m.tokenTable, serverURL, clientRef, accountID)
 }
 
 // GetSessionState returns the lifecycle state of the stored token for a
 // (server, account) pair. A missing token yields a NotFound error.
-func (m *OAuthManager) GetSessionState(ctx context.Context, serverURL, accountID string) (SessionState, error) {
-	return getSessionState(ctx, m.tokenTable, serverURL, accountID)
+func (m *OAuthManager) GetSessionState(ctx context.Context, serverURL, clientRef, accountID string) (SessionState, error) {
+	return getSessionState(ctx, m.tokenTable, serverURL, clientRef, accountID)
 }
 
-// ListTokens returns all stored tokens for a server, or every stored token when
-// serverURL is empty.
-func (m *OAuthManager) ListTokens(ctx context.Context, serverURL string) ([]*TokenEntry, error) {
-	return listTokens(ctx, m.tokenTable, serverURL)
+// ListTokens returns the stored tokens for a given (server, clientRef) pair. The
+// primary use case is token invalidation when a static client is removed, so the
+// listing is always scoped to a single ClientRef (dynamic callers pass ""). When
+// serverURL is empty the listing spans every server for that ClientRef.
+func (m *OAuthManager) ListTokens(ctx context.Context, serverURL string, clientRef string) ([]*TokenEntry, error) {
+	return listTokens(ctx, m.tokenTable, serverURL, clientRef)
 }
 
 // refreshToken performs the token-refresh exchange (RFC 6749 §6) with the
@@ -111,15 +113,15 @@ func (m *OAuthManager) refreshToken(ctx context.Context, key *TokenKey, entry *T
 
 // getToken implements GetToken against the tokenStore/refreshLockerAPI/refreshFunc
 // interfaces so it is unit-testable with fakes.
-func getToken(ctx context.Context, tokens tokenStore, locks refreshLockerAPI, refresh refreshFunc, serverURL, accountID string) (*TokenEntry, error) {
-	key, err := tokenKeyFor(serverURL, accountID)
+func getToken(ctx context.Context, tokens tokenStore, locks refreshLockerAPI, refresh refreshFunc, serverURL, clientRef, accountID string) (*TokenEntry, error) {
+	key, err := tokenKeyFor(serverURL, clientRef, accountID)
 	if err != nil {
 		return nil, err
 	}
 	entry, err := tokens.Find(ctx, key)
 	if err != nil {
 		if errors.IsNotFound(err) {
-			return nil, errors.Wrapf(errors.NotFound, "oauth: no token for %s/%s", key.ServerURL, key.AccountID)
+			return nil, errors.Wrapf(errors.NotFound, "oauth: no token for %s", key.id())
 		}
 		return nil, err
 	}
@@ -138,8 +140,8 @@ func getToken(ctx context.Context, tokens tokenStore, locks refreshLockerAPI, re
 
 // forceRefresh implements RefreshToken: a lock-guarded refresh regardless of
 // remaining lifetime.
-func forceRefresh(ctx context.Context, tokens tokenStore, locks refreshLockerAPI, refresh refreshFunc, serverURL, accountID string) (*TokenEntry, error) {
-	key, err := tokenKeyFor(serverURL, accountID)
+func forceRefresh(ctx context.Context, tokens tokenStore, locks refreshLockerAPI, refresh refreshFunc, serverURL, clientRef, accountID string) (*TokenEntry, error) {
+	key, err := tokenKeyFor(serverURL, clientRef, accountID)
 	if err != nil {
 		return nil, err
 	}
@@ -160,14 +162,14 @@ func forceRefresh(ctx context.Context, tokens tokenStore, locks refreshLockerAPI
 // When force is false the re-read short-circuits if the token is no longer near
 // expiry, returning the fresh token without a network call.
 func lockedRefresh(ctx context.Context, tokens tokenStore, locks refreshLockerAPI, refresh refreshFunc, key *TokenKey, force bool) (*TokenEntry, error) {
-	lock, err := locks.TryAcquire(ctx, &TokenRefreshLockKey{ServerURL: key.ServerURL, AccountID: key.AccountID})
+	lock, err := locks.TryAcquire(ctx, &TokenRefreshLockKey{ServerURL: key.ServerURL, ClientRef: key.ClientRef, AccountID: key.AccountID})
 	if err != nil {
 		return nil, errors.Wrapf(errors.GetErrCode(err),
-			"oauth: could not acquire token-refresh lock for %s/%s: %s", key.ServerURL, key.AccountID, err)
+			"oauth: could not acquire token-refresh lock for %s: %s", key.id(), err)
 	}
 	defer func() {
 		if cerr := lock.Close(); cerr != nil {
-			log.Printf("oauth: failed to release token-refresh lock for %s/%s: %s", key.ServerURL, key.AccountID, cerr)
+			log.Printf("oauth: failed to release token-refresh lock for %s: %s", key.id(), cerr)
 		}
 	}()
 
@@ -175,7 +177,7 @@ func lockedRefresh(ctx context.Context, tokens tokenStore, locks refreshLockerAP
 	entry, err := tokens.Find(ctx, key)
 	if err != nil {
 		if errors.IsNotFound(err) {
-			return nil, errors.Wrapf(errors.NotFound, "oauth: no token for %s/%s", key.ServerURL, key.AccountID)
+			return nil, errors.Wrapf(errors.NotFound, "oauth: no token for %s", key.id())
 		}
 		return nil, err
 	}
@@ -203,8 +205,8 @@ func lockedRefresh(ctx context.Context, tokens tokenStore, locks refreshLockerAP
 		}
 		entry.ErrorReason = err.Error()
 		if uerr := tokens.Update(ctx, key, entry); uerr != nil {
-			log.Printf("oauth: failed to persist %s state for %s/%s after refresh failure: %s",
-				entry.State, key.ServerURL, key.AccountID, uerr)
+			log.Printf("oauth: failed to persist %s state for %s after refresh failure: %s",
+				entry.State, key.id(), uerr)
 		}
 		return nil, err
 	}
@@ -222,7 +224,7 @@ func lockedRefresh(ctx context.Context, tokens tokenStore, locks refreshLockerAP
 	}
 	if err := tokens.Update(ctx, key, updated); err != nil {
 		return nil, errors.Wrapf(errors.GetErrCode(err),
-			"oauth: failed to persist refreshed token for %s/%s: %s", key.ServerURL, key.AccountID, err)
+			"oauth: failed to persist refreshed token for %s: %s", key.id(), err)
 	}
 	return updated, nil
 }
@@ -235,8 +237,8 @@ func refreshTokenExchange(ctx context.Context, do httpDoFunc, servers serverCach
 	if strings.TrimSpace(entry.RefreshToken) == "" {
 		// No refresh token to present — the session can only be restored by a
 		// fresh authorization, so treat it as permanent.
-		return nil, fmt.Errorf("oauth: no refresh token stored for %s/%s: %w",
-			key.ServerURL, key.AccountID, errPermanentRefresh)
+		return nil, fmt.Errorf("oauth: no refresh token stored for %s: %w",
+			key.id(), errPermanentRefresh)
 	}
 
 	server, err := getCachedServer(ctx, servers, key.ServerURL)
@@ -316,15 +318,15 @@ func refreshedTokenEntry(prev *TokenEntry, tr *tokenResponse, now time.Time) *To
 
 // revokeToken implements RevokeToken against the tokenStore/serverCache/
 // clientStore/httpDoFunc interfaces so it is unit-testable with fakes.
-func revokeToken(ctx context.Context, tokens tokenStore, do httpDoFunc, servers serverCache, clients clientStore, serverURL, accountID string) error {
-	key, err := tokenKeyFor(serverURL, accountID)
+func revokeToken(ctx context.Context, tokens tokenStore, do httpDoFunc, servers serverCache, clients clientStore, serverURL, clientRef, accountID string) error {
+	key, err := tokenKeyFor(serverURL, clientRef, accountID)
 	if err != nil {
 		return err
 	}
 	entry, err := tokens.Find(ctx, key)
 	if err != nil {
 		if errors.IsNotFound(err) {
-			return errors.Wrapf(errors.NotFound, "oauth: no token for %s/%s", key.ServerURL, key.AccountID)
+			return errors.Wrapf(errors.NotFound, "oauth: no token for %s", key.id())
 		}
 		return err
 	}
@@ -345,7 +347,7 @@ func revokeToken(ctx context.Context, tokens tokenStore, do httpDoFunc, servers 
 	}
 	if uerr := tokens.Update(ctx, key, entry); uerr != nil {
 		return errors.Wrapf(errors.GetErrCode(uerr),
-			"oauth: failed to mark token revoked for %s/%s: %s", key.ServerURL, key.AccountID, uerr)
+			"oauth: failed to mark token revoked for %s: %s", key.id(), uerr)
 	}
 	// Surface the server error (if any) so the caller knows server-side
 	// revocation did not complete, even though the local session is revoked.
@@ -372,7 +374,7 @@ func revokeAtServer(ctx context.Context, do httpDoFunc, servers serverCache, cli
 	}
 	if token == "" {
 		return errors.Wrapf(errors.InvalidArgument,
-			"oauth: token for %s/%s has nothing to revoke", key.ServerURL, key.AccountID)
+			"oauth: token for %s has nothing to revoke", key.id())
 	}
 
 	form := url.Values{}
@@ -392,39 +394,41 @@ func revokeAtServer(ctx context.Context, do httpDoFunc, servers serverCache, cli
 
 // deleteToken implements DeleteToken: an idempotent remove (a missing entry is
 // not an error).
-func deleteToken(ctx context.Context, tokens tokenStore, serverURL, accountID string) error {
-	key, err := tokenKeyFor(serverURL, accountID)
+func deleteToken(ctx context.Context, tokens tokenStore, serverURL, clientRef, accountID string) error {
+	key, err := tokenKeyFor(serverURL, clientRef, accountID)
 	if err != nil {
 		return err
 	}
 	if err := tokens.DeleteKey(ctx, key); err != nil && !errors.IsNotFound(err) {
 		return errors.Wrapf(errors.GetErrCode(err),
-			"oauth: failed to delete token for %s/%s: %s", key.ServerURL, key.AccountID, err)
+			"oauth: failed to delete token for %s: %s", key.id(), err)
 	}
 	return nil
 }
 
 // getSessionState implements GetSessionState.
-func getSessionState(ctx context.Context, tokens tokenStore, serverURL, accountID string) (SessionState, error) {
-	key, err := tokenKeyFor(serverURL, accountID)
+func getSessionState(ctx context.Context, tokens tokenStore, serverURL, clientRef, accountID string) (SessionState, error) {
+	key, err := tokenKeyFor(serverURL, clientRef, accountID)
 	if err != nil {
 		return "", err
 	}
 	entry, err := tokens.Find(ctx, key)
 	if err != nil {
 		if errors.IsNotFound(err) {
-			return "", errors.Wrapf(errors.NotFound, "oauth: no token for %s/%s", key.ServerURL, key.AccountID)
+			return "", errors.Wrapf(errors.NotFound, "oauth: no token for %s", key.id())
 		}
 		return "", err
 	}
 	return entry.State, nil
 }
 
-// listTokens implements ListTokens. An empty serverURL lists every token; a
-// non-empty one filters by the normalized server URL on the token key (_id). A
-// zero limit means no limit.
-func listTokens(ctx context.Context, tokens tokenStore, serverURL string) ([]*TokenEntry, error) {
-	filter := bson.M{}
+// listTokens implements ListTokens. The listing is scoped to a single clientRef
+// on the token key (_id): an empty serverURL spans every server for that
+// clientRef, a non-empty one also filters by the normalized server URL. A zero
+// limit means no limit. (Final filter scoping for the dynamic "" clientRef is
+// finalized in AUTH-0012.)
+func listTokens(ctx context.Context, tokens tokenStore, serverURL string, clientRef string) ([]*TokenEntry, error) {
+	filter := bson.M{"_id.clientRef": clientRef}
 	if normalized := normalizeServerURL(serverURL); normalized != "" {
 		filter["_id.serverUrl"] = normalized
 	}
@@ -435,8 +439,11 @@ func listTokens(ctx context.Context, tokens tokenStore, serverURL string) ([]*To
 	return entries, nil
 }
 
-// tokenKeyFor validates the inputs and builds a normalized token key.
-func tokenKeyFor(serverURL, accountID string) (*TokenKey, error) {
+// tokenKeyFor validates the inputs and builds a normalized token key. clientRef
+// is the consumer-defined opaque label disambiguating multiple clients for the
+// same server; dynamic registration passes "" (omitted from the stored key by
+// the omitempty BSON tag).
+func tokenKeyFor(serverURL, clientRef, accountID string) (*TokenKey, error) {
 	normalized := normalizeServerURL(serverURL)
 	if normalized == "" {
 		return nil, errors.Wrap(errors.InvalidArgument, "oauth: serverURL must not be empty")
@@ -444,7 +451,16 @@ func tokenKeyFor(serverURL, accountID string) (*TokenKey, error) {
 	if strings.TrimSpace(accountID) == "" {
 		return nil, errors.Wrap(errors.InvalidArgument, "oauth: accountID must not be empty")
 	}
-	return &TokenKey{ServerURL: normalized, AccountID: accountID}, nil
+	return &TokenKey{ServerURL: normalized, ClientRef: clientRef, AccountID: accountID}, nil
+}
+
+// id renders the token key as a human-readable identity for diagnostics:
+// "serverURL/clientRef/accountID". A dynamic client's empty ClientRef renders as
+// an empty middle segment ("serverURL//accountID"), which unambiguously signals
+// the dynamic slot and disambiguates the message once multiple clients can share
+// a (server, account) pair.
+func (k *TokenKey) id() string {
+	return fmt.Sprintf("%s/%s/%s", k.ServerURL, k.ClientRef, k.AccountID)
 }
 
 // postTokenEndpoint POSTs a form-encoded token request and, on success, decodes

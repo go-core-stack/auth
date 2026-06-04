@@ -74,7 +74,8 @@ func (m *OAuthManager) AuthorizationURL(ctx context.Context, opts AuthorizeOptio
 // pending state by the returned CSRF state, exchanges the authorization code for
 // tokens at the server's token endpoint (presenting the stored PKCE verifier),
 // persists the resulting token (encrypted, state=active) keyed by
-// {serverURL, accountId}, and deletes the now-consumed pending state. An unknown
+// {serverURL, clientRef, accountId} — clientRef recovered from the pending state
+// — and deletes the now-consumed pending state. An unknown
 // or expired state yields a clear error.
 //
 // Security note: the account the token is stored under is taken from the
@@ -145,6 +146,7 @@ func authorizationURL(ctx context.Context, servers serverCache, clients clientSt
 	// lives here, so the callback needs no in-memory session.
 	ps := &PendingAuthState{
 		ServerURL:    normalized,
+		ClientRef:    merged.ClientRef,
 		AccountID:    merged.AccountID,
 		ClientID:     client.ClientID,
 		CodeVerifier: verifier,
@@ -240,10 +242,10 @@ func handleCallback(ctx context.Context, do httpDoFunc, servers serverCache, pen
 	// the state survives (TTL-bounded) for a retry, and we never drop the
 	// verifier with no token to show for it. Sensitive fields are encrypted at
 	// rest by TokenEntry.MarshalBSON.
-	tokenKey := &TokenKey{ServerURL: ps.ServerURL, AccountID: ps.AccountID}
+	tokenKey := &TokenKey{ServerURL: ps.ServerURL, ClientRef: ps.ClientRef, AccountID: ps.AccountID}
 	if err := tokens.Locate(ctx, tokenKey, entry); err != nil {
 		return nil, errors.Wrapf(errors.GetErrCode(err),
-			"oauth: failed to persist token for %s/%s: %s", ps.ServerURL, ps.AccountID, err)
+			"oauth: failed to persist token for %s: %s", tokenKey.id(), err)
 	}
 
 	// Consume the single-use pending state. The token is already durably stored,

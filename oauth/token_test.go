@@ -75,14 +75,21 @@ func (f *fakeTokenStore) Locate(ctx context.Context, key *TokenKey, entry *Token
 func (f *fakeTokenStore) FindMany(_ context.Context, filter any, _, _ int32) ([]*TokenEntry, error) {
 	f.lastFilter = filter
 	want, byServer := "", false
+	wantRef, byRef := "", false
 	if m, ok := filter.(bson.M); ok {
 		if s, ok := m["_id.serverUrl"].(string); ok {
 			want, byServer = s, true
+		}
+		if s, ok := m["_id.clientRef"].(string); ok {
+			wantRef, byRef = s, true
 		}
 	}
 	var out []*TokenEntry
 	for k, e := range f.entries {
 		if byServer && k.ServerURL != want {
+			continue
+		}
+		if byRef && k.ClientRef != wantRef {
 			continue
 		}
 		cp := *e
@@ -122,7 +129,7 @@ func TestGetToken_HealthyReturnsAsIs(t *testing.T) {
 	}
 	locks := &fakeLocker{}
 
-	got, err := getToken(context.Background(), tokens, locks, failRefresh(t), "https://api.example.com/", "acct-1")
+	got, err := getToken(context.Background(), tokens, locks, failRefresh(t), "https://api.example.com/", "", "acct-1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -144,7 +151,7 @@ func TestGetToken_NearExpiryRefreshes(t *testing.T) {
 	refreshed := &TokenEntry{AccessToken: "new", State: SessionActive, ExpiresAt: time.Now().Add(time.Hour).Unix()}
 	refresh := func(_ context.Context, _ *TokenKey, _ *TokenEntry) (*TokenEntry, error) { return refreshed, nil }
 
-	got, err := getToken(context.Background(), tokens, locks, refresh, "https://api.example.com", "acct-1")
+	got, err := getToken(context.Background(), tokens, locks, refresh, "https://api.example.com", "", "acct-1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -161,7 +168,7 @@ func TestGetToken_NearExpiryRefreshes(t *testing.T) {
 
 func TestGetToken_NotFound(t *testing.T) {
 	tokens := newFakeTokenStore()
-	_, err := getToken(context.Background(), tokens, &fakeLocker{}, failRefresh(t), "https://api.example.com", "acct-1")
+	_, err := getToken(context.Background(), tokens, &fakeLocker{}, failRefresh(t), "https://api.example.com", "", "acct-1")
 	if !errors.IsNotFound(err) {
 		t.Fatalf("expected NotFound, got %v", err)
 	}
@@ -174,7 +181,7 @@ func TestGetToken_RevokedReturnedAsIs(t *testing.T) {
 	}
 	locks := &fakeLocker{}
 
-	got, err := getToken(context.Background(), tokens, locks, failRefresh(t), "https://api.example.com", "acct-1")
+	got, err := getToken(context.Background(), tokens, locks, failRefresh(t), "https://api.example.com", "", "acct-1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -183,6 +190,35 @@ func TestGetToken_RevokedReturnedAsIs(t *testing.T) {
 	}
 	if locks.acquired != 0 {
 		t.Errorf("a revoked token must not be refreshed")
+	}
+}
+
+// Tokens for the same (server, account) but different ClientRef values are
+// stored and retrieved independently: the dynamic slot ("") and a static client
+// ("tenant-a") must not collide.
+func TestGetToken_ClientRefIsolation(t *testing.T) {
+	tokens := newFakeTokenStore()
+	hour := time.Now().Add(time.Hour).Unix()
+	tokens.entries[TokenKey{ServerURL: "https://api.example.com", AccountID: "user1"}] =
+		&TokenEntry{AccessToken: "dynamic-tok", State: SessionActive, ExpiresAt: hour}
+	tokens.entries[TokenKey{ServerURL: "https://api.example.com", ClientRef: "tenant-a", AccountID: "user1"}] =
+		&TokenEntry{AccessToken: "tenant-a-tok", State: SessionActive, ExpiresAt: hour}
+	locks := &fakeLocker{}
+
+	dyn, err := getToken(context.Background(), tokens, locks, failRefresh(t), "https://api.example.com", "", "user1")
+	if err != nil {
+		t.Fatalf("dynamic GetToken: %v", err)
+	}
+	if dyn.AccessToken != "dynamic-tok" {
+		t.Errorf("dynamic token = %q, want dynamic-tok", dyn.AccessToken)
+	}
+
+	static, err := getToken(context.Background(), tokens, locks, failRefresh(t), "https://api.example.com", "tenant-a", "user1")
+	if err != nil {
+		t.Fatalf("tenant-a GetToken: %v", err)
+	}
+	if static.AccessToken != "tenant-a-tok" {
+		t.Errorf("tenant-a token = %q, want tenant-a-tok", static.AccessToken)
 	}
 }
 
@@ -198,7 +234,7 @@ func TestRefreshToken_ForcesRefreshOnHealthyToken(t *testing.T) {
 		return &TokenEntry{AccessToken: "new", State: SessionActive}, nil
 	}
 
-	got, err := forceRefresh(context.Background(), tokens, locks, refresh, "https://api.example.com", "acct-1")
+	got, err := forceRefresh(context.Background(), tokens, locks, refresh, "https://api.example.com", "", "acct-1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -515,7 +551,7 @@ func TestRevokeToken_Success(t *testing.T) {
 		return statusResponse(http.StatusOK), nil
 	}
 
-	if err := revokeToken(context.Background(), tokens, do, servers, clients, "https://api.example.com", "acct-1"); err != nil {
+	if err := revokeToken(context.Background(), tokens, do, servers, clients, "https://api.example.com", "", "acct-1"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if sawURL != "https://as.example.com/revoke" {
@@ -545,7 +581,7 @@ func TestRevokeToken_AlreadyRevokedIsNoOp(t *testing.T) {
 		return nil, nil
 	}
 
-	if err := revokeToken(context.Background(), tokens, do, servers, clients, "https://api.example.com", "acct-1"); err != nil {
+	if err := revokeToken(context.Background(), tokens, do, servers, clients, "https://api.example.com", "", "acct-1"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if tokens.updateCalls != 0 {
@@ -565,7 +601,7 @@ func TestRevokeToken_ServerFailureStillRevokesLocally(t *testing.T) {
 		return statusResponse(http.StatusInternalServerError), nil
 	}
 
-	err := revokeToken(context.Background(), tokens, do, servers, clients, "https://api.example.com", "acct-1")
+	err := revokeToken(context.Background(), tokens, do, servers, clients, "https://api.example.com", "", "acct-1")
 	if err == nil {
 		t.Fatal("expected the server error to be surfaced")
 	}
@@ -586,7 +622,7 @@ func TestRevokeToken_NoRevocationEndpoint(t *testing.T) {
 		return nil, nil
 	}
 
-	err := revokeToken(context.Background(), tokens, do, servers, clients, "https://api.example.com", "acct-1")
+	err := revokeToken(context.Background(), tokens, do, servers, clients, "https://api.example.com", "", "acct-1")
 	if err == nil {
 		t.Fatal("expected an error when no revocation endpoint is advertised")
 	}
@@ -598,7 +634,7 @@ func TestRevokeToken_NoRevocationEndpoint(t *testing.T) {
 func TestRevokeToken_NotFound(t *testing.T) {
 	tokens := newFakeTokenStore()
 	do := func(_ *http.Request) (*http.Response, error) { return statusResponse(http.StatusOK), nil }
-	err := revokeToken(context.Background(), tokens, do, newFakeServerCache(), newFakeClientStore(), "https://api.example.com", "acct-1")
+	err := revokeToken(context.Background(), tokens, do, newFakeServerCache(), newFakeClientStore(), "https://api.example.com", "", "acct-1")
 	if !errors.IsNotFound(err) {
 		t.Fatalf("expected NotFound for a missing token, got %v", err)
 	}
@@ -610,14 +646,14 @@ func TestDeleteToken_IdempotentAndRemoves(t *testing.T) {
 	tokens := newFakeTokenStore()
 	tokens.entries[*testTokenKey()] = &TokenEntry{State: SessionActive}
 
-	if err := deleteToken(context.Background(), tokens, "https://api.example.com", "acct-1"); err != nil {
+	if err := deleteToken(context.Background(), tokens, "https://api.example.com", "", "acct-1"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if _, ok := tokens.entries[*testTokenKey()]; ok {
 		t.Error("token must be removed")
 	}
 	// deleting again is not an error (idempotent)
-	if err := deleteToken(context.Background(), tokens, "https://api.example.com", "acct-1"); err != nil {
+	if err := deleteToken(context.Background(), tokens, "https://api.example.com", "", "acct-1"); err != nil {
 		t.Errorf("delete of a missing token must be idempotent, got %v", err)
 	}
 }
@@ -626,7 +662,7 @@ func TestGetSessionState(t *testing.T) {
 	tokens := newFakeTokenStore()
 	tokens.entries[*testTokenKey()] = &TokenEntry{State: SessionFailed}
 
-	st, err := getSessionState(context.Background(), tokens, "https://api.example.com", "acct-1")
+	st, err := getSessionState(context.Background(), tokens, "https://api.example.com", "", "acct-1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -634,7 +670,7 @@ func TestGetSessionState(t *testing.T) {
 		t.Errorf("state = %q, want %q", st, SessionFailed)
 	}
 
-	if _, err := getSessionState(context.Background(), tokens, "https://api.example.com", "missing"); !errors.IsNotFound(err) {
+	if _, err := getSessionState(context.Background(), tokens, "https://api.example.com", "", "missing"); !errors.IsNotFound(err) {
 		t.Errorf("expected NotFound for missing token, got %v", err)
 	}
 }
@@ -645,7 +681,7 @@ func TestListTokens_AllAndByServer(t *testing.T) {
 	tokens.entries[TokenKey{ServerURL: "https://api.example.com", AccountID: "b"}] = &TokenEntry{AccessToken: "2"}
 	tokens.entries[TokenKey{ServerURL: "https://other.example.com", AccountID: "c"}] = &TokenEntry{AccessToken: "3"}
 
-	all, err := listTokens(context.Background(), tokens, "")
+	all, err := listTokens(context.Background(), tokens, "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -656,7 +692,7 @@ func TestListTokens_AllAndByServer(t *testing.T) {
 		t.Error("expected a filter to be passed")
 	}
 
-	byServer, err := listTokens(context.Background(), tokens, "https://api.example.com/")
+	byServer, err := listTokens(context.Background(), tokens, "https://api.example.com/", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -669,17 +705,115 @@ func TestListTokens_AllAndByServer(t *testing.T) {
 }
 
 func TestTokenKeyFor_Validation(t *testing.T) {
-	if _, err := tokenKeyFor("", "acct"); !errors.IsInvalidArgument(err) {
+	if _, err := tokenKeyFor("", "", "acct"); !errors.IsInvalidArgument(err) {
 		t.Errorf("empty serverURL: expected InvalidArgument, got %v", err)
 	}
-	if _, err := tokenKeyFor("https://api.example.com", "  "); !errors.IsInvalidArgument(err) {
+	if _, err := tokenKeyFor("https://api.example.com", "", "  "); !errors.IsInvalidArgument(err) {
 		t.Errorf("blank accountID: expected InvalidArgument, got %v", err)
 	}
-	key, err := tokenKeyFor("https://api.example.com/", "acct")
+	key, err := tokenKeyFor("https://api.example.com/", "", "acct")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if key.ServerURL != "https://api.example.com" {
 		t.Errorf("serverURL not normalized: %q", key.ServerURL)
+	}
+}
+
+// tokenKeyFor must carry a non-empty clientRef through into the key.
+func TestTokenKeyFor_ClientRef(t *testing.T) {
+	key, err := tokenKeyFor("https://api.example.com", "tenant-a", "acct")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if key.ClientRef != "tenant-a" {
+		t.Errorf("ClientRef = %q, want tenant-a", key.ClientRef)
+	}
+}
+
+// A forced refresh on a token stored under a non-empty ClientRef must acquire
+// the refresh lock under a key that carries that same ClientRef, so static and
+// dynamic refreshes for one (server, account) do not serialize on each other.
+func TestForceRefresh_LockKeyCarriesClientRef(t *testing.T) {
+	tokens := newFakeTokenStore()
+	tokens.entries[TokenKey{ServerURL: "https://api.example.com", ClientRef: "tenant-a", AccountID: "acct-1"}] =
+		&TokenEntry{AccessToken: "old", RefreshToken: "rt", State: SessionActive}
+	locks := &fakeLocker{}
+	refresh := func(_ context.Context, _ *TokenKey, _ *TokenEntry) (*TokenEntry, error) {
+		return &TokenEntry{AccessToken: "new", State: SessionActive}, nil
+	}
+
+	if _, err := forceRefresh(context.Background(), tokens, locks, refresh, "https://api.example.com", "tenant-a", "acct-1"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if locks.lastKey == nil {
+		t.Fatal("expected the refresh lock to be acquired")
+	}
+	if locks.lastKey.ClientRef != "tenant-a" {
+		t.Errorf("lock key ClientRef = %q, want tenant-a", locks.lastKey.ClientRef)
+	}
+	if locks.lastKey.ServerURL != "https://api.example.com" || locks.lastKey.AccountID != "acct-1" {
+		t.Errorf("lock key = %+v, want server/account preserved", locks.lastKey)
+	}
+}
+
+// Revoke, session-state, and delete must all operate on the ClientRef-scoped key
+// and leave a same-(server,account) token under a different ClientRef untouched.
+func TestTokenLifecycle_WithClientRef(t *testing.T) {
+	tokens := newFakeTokenStore()
+	refKey := TokenKey{ServerURL: "https://api.example.com", ClientRef: "tenant-a", AccountID: "acct-1"}
+	dynKey := TokenKey{ServerURL: "https://api.example.com", AccountID: "acct-1"}
+	tokens.entries[refKey] = &TokenEntry{AccessToken: "ref-at", State: SessionActive}
+	tokens.entries[dynKey] = &TokenEntry{AccessToken: "dyn-at", State: SessionActive}
+	do := func(_ *http.Request) (*http.Response, error) { return jsonStatusResponse(http.StatusOK, "{}"), nil }
+
+	if err := revokeToken(context.Background(), tokens, do, newFakeServerCache(), newFakeClientStore(), "https://api.example.com", "tenant-a", "acct-1"); err != nil {
+		// No revocation endpoint advertised → server error surfaced, but local
+		// state must still transition. That is asserted below; tolerate the error.
+		_ = err
+	}
+	if tokens.entries[refKey].State != SessionRevoked {
+		t.Errorf("tenant-a token state = %q, want revoked", tokens.entries[refKey].State)
+	}
+	if tokens.entries[dynKey].State != SessionActive {
+		t.Errorf("dynamic token must be untouched, state = %q", tokens.entries[dynKey].State)
+	}
+
+	st, err := getSessionState(context.Background(), tokens, "https://api.example.com", "tenant-a", "acct-1")
+	if err != nil {
+		t.Fatalf("session state: %v", err)
+	}
+	if st != SessionRevoked {
+		t.Errorf("session state = %q, want revoked", st)
+	}
+
+	if err := deleteToken(context.Background(), tokens, "https://api.example.com", "tenant-a", "acct-1"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, ok := tokens.entries[refKey]; ok {
+		t.Error("tenant-a token must be deleted")
+	}
+	if _, ok := tokens.entries[dynKey]; !ok {
+		t.Error("dynamic token must survive deletion of the tenant-a token")
+	}
+}
+
+// ListTokens is scoped to a single ClientRef: it returns only tokens for that
+// ref, not the dynamic slot or other refs on the same server.
+func TestListTokens_ByClientRef(t *testing.T) {
+	tokens := newFakeTokenStore()
+	tokens.entries[TokenKey{ServerURL: "https://api.example.com", AccountID: "a"}] = &TokenEntry{AccessToken: "dyn"}
+	tokens.entries[TokenKey{ServerURL: "https://api.example.com", ClientRef: "tenant-a", AccountID: "b"}] = &TokenEntry{AccessToken: "ta"}
+	tokens.entries[TokenKey{ServerURL: "https://api.example.com", ClientRef: "tenant-b", AccountID: "c"}] = &TokenEntry{AccessToken: "tb"}
+
+	list, err := listTokens(context.Background(), tokens, "https://api.example.com", "tenant-a")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(list) != 1 || list[0].AccessToken != "ta" {
+		t.Errorf("ListTokens(tenant-a) = %+v, want only the tenant-a token", list)
+	}
+	if m, ok := tokens.lastFilter.(bson.M); !ok || m["_id.clientRef"] != "tenant-a" {
+		t.Errorf("expected a clientRef filter, got %v", tokens.lastFilter)
 	}
 }

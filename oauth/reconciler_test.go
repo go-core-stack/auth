@@ -71,10 +71,12 @@ type fakeLocker struct {
 	acquireErr error
 	lock       *fakeLock
 	acquired   int
+	lastKey    *TokenRefreshLockKey
 }
 
-func (f *fakeLocker) TryAcquire(_ context.Context, _ *TokenRefreshLockKey) (coresync.Lock, error) {
+func (f *fakeLocker) TryAcquire(_ context.Context, key *TokenRefreshLockKey) (coresync.Lock, error) {
 	f.acquired++
+	f.lastKey = key
 	if f.acquireErr != nil {
 		return nil, f.acquireErr
 	}
