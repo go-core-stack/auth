@@ -14,6 +14,7 @@ import (
 
 	"github.com/go-core-stack/core/errors"
 	coresync "github.com/go-core-stack/core/sync"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 const (
@@ -97,6 +98,18 @@ func (m *OAuthManager) GetClient(ctx context.Context, serverURL string, clientRe
 // be non-empty — "" is reserved exclusively for the dynamic client slot.
 func (m *OAuthManager) RegisterStaticClient(ctx context.Context, serverURL string, clientRef string, entry ClientEntry) error {
 	return registerStaticClient(ctx, m.clientTable, serverURL, clientRef, entry)
+}
+
+// DeleteClient removes a static client registration and cascade-deletes every
+// token issued for that (serverURL, clientRef) pair. It is the offboarding
+// counterpart to RegisterStaticClient: tokens are deleted first so a partial
+// failure never leaves orphaned tokens pointing at a deleted client. The cascade
+// and the record delete run under the per-(server, clientRef) registration lock
+// so they are atomic against a concurrent (re-)registration of the same client.
+// clientRef must be non-empty — the dynamic client slot ("") cannot be deleted
+// via this API. A missing client record is tolerated (idempotent).
+func (m *OAuthManager) DeleteClient(ctx context.Context, serverURL, clientRef string) error {
+	return deleteClient(ctx, m.clientTable, m.tokenTable, m.registrationLocks, serverURL, clientRef)
 }
 
 // registerDynamicClient implements RegisterDynamicClient against the
@@ -283,6 +296,67 @@ func registerStaticClient(ctx context.Context, clients clientStore, serverURL, c
 	if err := clients.Locate(ctx, &ClientKey{ServerURL: normalized, ClientRef: clientRef}, &entry); err != nil {
 		return errors.Wrapf(errors.GetErrCode(err),
 			"oauth: failed to persist static client for %s (clientRef %q): %s", normalized, clientRef, err)
+	}
+	return nil
+}
+
+// deleteClient implements DeleteClient against the clientStore / tokenDeleter /
+// registrationLocker interfaces so it is unit-testable with fakes. It
+// cascade-deletes the client's tokens before removing the client record:
+// ordering it this way means a partial failure (tokens deleted, client delete
+// fails) never leaves orphaned tokens pointing at a deleted client. Restricted
+// to static clients (clientRef != ""): the dynamic slot ("") cannot be deleted
+// here. A NotFound on the client delete is tolerated (idempotent) — the token
+// cascade may still have done useful work.
+//
+// The cascade and the record delete are performed under the per-(server,
+// clientRef) registration lock, mirroring reRegisterClient's discipline, so a
+// concurrent RegisterStaticClient / ReRegisterClient for the same client cannot
+// interleave with the delete (e.g. re-provision a client between the token
+// cascade and the record delete, leaving the freshly registered client
+// deleted). As in the re-register path, lock contention surfaces a retryable
+// error rather than racing — input validation runs first so an invalid request
+// never takes the lock.
+func deleteClient(ctx context.Context, clients clientStore, tokens tokenDeleter, locks registrationLocker, serverURL, clientRef string) error {
+	normalized := normalizeServerURL(serverURL)
+	if normalized == "" {
+		return errors.Wrap(errors.InvalidArgument, "oauth: serverURL must not be empty")
+	}
+	if strings.TrimSpace(clientRef) == "" {
+		return errors.Wrap(errors.InvalidArgument,
+			"oauth: clientRef must not be empty for client deletion")
+	}
+
+	// Serialize against (re-)registration of the same (server, clientRef). The
+	// lock is keyed identically to the registration paths, so a delete and a
+	// concurrent register cannot run at once. TryAcquire is non-blocking; on
+	// contention surface a retryable error rather than deleting under a peer's
+	// in-flight registration.
+	lock, err := locks.TryAcquire(ctx, &RegistrationLockKey{ServerURL: normalized, ClientRef: clientRef})
+	if err != nil {
+		return errors.Wrapf(errors.GetErrCode(err),
+			"oauth: registration in progress for %s (clientRef %q); retry deletion: %s", normalized, clientRef, err)
+	}
+	defer func() { _ = lock.Close() }()
+
+	// Cascade: delete all tokens for this (serverURL, clientRef). clientRef is a
+	// non-empty static value here, so plain equality is correct — this avoids the
+	// absent-or-empty subtlety that only affects the dynamic "" case in
+	// ListTokens. The deleted count is intentionally ignored.
+	filter := bson.M{
+		"_id.serverUrl": normalized,
+		"_id.clientRef": clientRef,
+	}
+	if _, err := tokens.DeleteByFilter(ctx, filter); err != nil {
+		return errors.Wrapf(errors.GetErrCode(err),
+			"oauth: failed to delete tokens for client %s/%s: %s", normalized, clientRef, err)
+	}
+
+	// Delete the client record; tolerate its absence so the operation is
+	// idempotent.
+	if err := clients.DeleteKey(ctx, &ClientKey{ServerURL: normalized, ClientRef: clientRef}); err != nil && !errors.IsNotFound(err) {
+		return errors.Wrapf(errors.GetErrCode(err),
+			"oauth: failed to delete client %s/%s: %s", normalized, clientRef, err)
 	}
 	return nil
 }

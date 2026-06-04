@@ -44,6 +44,15 @@ type tokenStore interface {
 	FindMany(ctx context.Context, filter any, offset, limit int32) ([]*TokenEntry, error)
 }
 
+// tokenDeleter is the subset of the token table the client-deletion cascade
+// needs: a bulk delete by filter. The concrete *table.Table[TokenKey, TokenEntry]
+// satisfies it; tests substitute a fake. The signature mirrors
+// core/table.Table.DeleteByFilter exactly — it returns (int64, error), not error
+// alone — so *table.Table is assignable to it; deleteClient ignores the count.
+type tokenDeleter interface {
+	DeleteByFilter(ctx context.Context, filter any) (int64, error)
+}
+
 // oauthErrorResponse is the RFC 6749 §5.2 token-endpoint error response. Parsed
 // to classify a non-2xx refresh outcome as permanent vs transient.
 type oauthErrorResponse struct {
