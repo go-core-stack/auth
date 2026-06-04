@@ -622,8 +622,9 @@ func TestRegisterStaticClient_SetsMetadataAndUpserts(t *testing.T) {
 	if stored.RegisteredAt == 0 {
 		t.Error("RegisteredAt should be set")
 	}
+	// Secret present -> derived confidential (the consumer value happens to agree).
 	if stored.ClientType != ClientTypeConfidential {
-		t.Errorf("ClientType = %d, want consumer-supplied %d", stored.ClientType, ClientTypeConfidential)
+		t.Errorf("ClientType = %d, want derived %d", stored.ClientType, ClientTypeConfidential)
 	}
 	if stored.ClientID != "static-id" || stored.ClientSecret != "shh" {
 		t.Errorf("consumer-supplied credentials not preserved: %+v", stored)
@@ -636,6 +637,74 @@ func TestRegisterStaticClient_SetsMetadataAndUpserts(t *testing.T) {
 	}
 	if got := clients.entries[ckey("https://api.example.com", "tenant-a")]; got == nil || got.ClientID != "rotated" {
 		t.Errorf("re-provision did not replace the entry; got %v", got)
+	}
+}
+
+// A non-empty ClientSecret derives ClientTypeConfidential.
+func TestRegisterStaticClient_DerivesConfidentialFromSecret(t *testing.T) {
+	clients := newFakeClientStore()
+
+	// No ClientType supplied; it must be derived from the secret's presence.
+	if err := registerStaticClient(context.Background(), clients, "https://api.example.com", "tenant-a",
+		ClientEntry{ClientID: "id", ClientSecret: "shh"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	stored := clients.entries[ckey("https://api.example.com", "tenant-a")]
+	if stored == nil {
+		t.Fatalf("client not persisted; keys=%v", clients.entries)
+	}
+	if stored.ClientType != ClientTypeConfidential {
+		t.Errorf("ClientType = %d, want %d (confidential)", stored.ClientType, ClientTypeConfidential)
+	}
+}
+
+// An empty or whitespace-only ClientSecret derives ClientTypePublic.
+func TestRegisterStaticClient_DerivesPublicFromBlankSecret(t *testing.T) {
+	cases := map[string]string{
+		"empty secret":      "",
+		"whitespace secret": "   \t ",
+	}
+	for name, secret := range cases {
+		t.Run(name, func(t *testing.T) {
+			clients := newFakeClientStore()
+			if err := registerStaticClient(context.Background(), clients, "https://api.example.com", "tenant-a",
+				ClientEntry{ClientID: "id", ClientSecret: secret}); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			stored := clients.entries[ckey("https://api.example.com", "tenant-a")]
+			if stored == nil {
+				t.Fatalf("client not persisted; keys=%v", clients.entries)
+			}
+			if stored.ClientType != ClientTypePublic {
+				t.Errorf("ClientType = %d, want %d (public)", stored.ClientType, ClientTypePublic)
+			}
+		})
+	}
+}
+
+// The derived ClientType is authoritative: a consumer-supplied ClientType must
+// not override it, in either direction.
+func TestRegisterStaticClient_ConsumerClientTypeIgnored(t *testing.T) {
+	// Consumer claims confidential but provides no secret -> derived public.
+	clients := newFakeClientStore()
+	if err := registerStaticClient(context.Background(), clients, "https://api.example.com", "tenant-a",
+		ClientEntry{ClientID: "id", ClientType: ClientTypeConfidential}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	stored := clients.entries[ckey("https://api.example.com", "tenant-a")]
+	if stored == nil || stored.ClientType != ClientTypePublic {
+		t.Errorf("ClientType = %v, want %d (public, ignoring consumer confidential)", stored, ClientTypePublic)
+	}
+
+	// Consumer claims public but provides a secret -> derived confidential.
+	clients = newFakeClientStore()
+	if err := registerStaticClient(context.Background(), clients, "https://api.example.com", "tenant-b",
+		ClientEntry{ClientID: "id", ClientSecret: "shh", ClientType: ClientTypePublic}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	stored = clients.entries[ckey("https://api.example.com", "tenant-b")]
+	if stored == nil || stored.ClientType != ClientTypeConfidential {
+		t.Errorf("ClientType = %v, want %d (confidential, ignoring consumer public)", stored, ClientTypeConfidential)
 	}
 }
 
