@@ -87,7 +87,7 @@ func (m *OAuthManager) AuthorizationURL(ctx context.Context, opts AuthorizeOptio
 // authenticated session before calling this, and reject a mismatch, to prevent
 // login-CSRF / session-fixation.
 func (m *OAuthManager) HandleCallback(ctx context.Context, state string, code string) (*TokenEntry, error) {
-	return handleCallback(ctx, m.httpDo, m.serverTable, m.pendingTable, m.tokenTable, state, code)
+	return handleCallback(ctx, m.httpDo, m.serverTable, m.pendingTable, m.tokenTable, m.clientTable, state, code)
 }
 
 // authorizationURL implements AuthorizationURL against the
@@ -173,9 +173,10 @@ func authorizationURL(ctx context.Context, servers serverCache, clients clientSt
 }
 
 // handleCallback implements HandleCallback against the
-// pendingStore/serverCache/tokenWriter/httpDoFunc interfaces so it is
-// unit-testable with fakes.
-func handleCallback(ctx context.Context, do httpDoFunc, servers serverCache, pending pendingStore, tokens tokenWriter, state, code string) (*TokenEntry, error) {
+// pendingStore/serverCache/tokenWriter/clientStore/httpDoFunc interfaces so it is
+// unit-testable with fakes. The clientStore lets the exchange attach confidential
+// client authentication (client_secret_post) when the initiating client is one.
+func handleCallback(ctx context.Context, do httpDoFunc, servers serverCache, pending pendingStore, tokens tokenWriter, clients clientStore, state, code string) (*TokenEntry, error) {
 	if strings.TrimSpace(state) == "" {
 		return nil, errors.Wrap(errors.InvalidArgument, "oauth: callback state must not be empty")
 	}
@@ -213,18 +214,41 @@ func handleCallback(ctx context.Context, do httpDoFunc, servers serverCache, pen
 			"oauth: server %s has no usable token endpoint", ps.ServerURL)
 	}
 
-	// RFC 6749 §4.1.3 / RFC 7636 §4.5 authorization-code exchange for a public
-	// client, presenting the stored PKCE verifier. The client_id is the one that
-	// initiated the flow (persisted in the pending state), not whatever is
-	// currently registered: the authorization code is bound to the initiating
-	// client, so a re-registration between AuthorizationURL and HandleCallback
-	// must not change the client_id presented at the exchange.
+	// RFC 6749 §4.1.3 / RFC 7636 §4.5 authorization-code exchange, presenting the
+	// stored PKCE verifier. The client_id is the one that initiated the flow
+	// (persisted in the pending state), not whatever is currently registered: the
+	// authorization code is bound to the initiating client, so a re-registration
+	// between AuthorizationURL and HandleCallback must not change the client_id
+	// presented at the exchange.
 	form := url.Values{}
 	form.Set("grant_type", grantTypeAuthorizationCode)
 	form.Set("code", code)
 	form.Set("code_verifier", ps.CodeVerifier)
-	form.Set("client_id", ps.ClientID)
 	form.Set("redirect_uri", ps.RedirectURI)
+
+	// Attach client authentication. A confidential client must present its
+	// client_secret (client_secret_post) at the token endpoint, so look up the
+	// full ClientEntry by ps.ClientRef (the key field — NOT ps.ClientID, the
+	// protocol id). attachClientAuth is used only when the looked-up client still
+	// matches the client_id bound into the pending state; if the client is gone,
+	// the lookup errors, or the client_id changed (e.g. a re-registration mid-flow
+	// rotated it), fall back to public auth — send client_id only, never a stale
+	// secret, and never fail the exchange over it.
+	client, err := findClient(ctx, clients, ps.ServerURL, ps.ClientRef)
+	if err == nil && client != nil && client.ClientID == ps.ClientID {
+		attachClientAuth(form, client)
+	} else {
+		// Fall back to public auth (client_id only). A non-nil err here is a real
+		// store failure (findClient maps NotFound to nil/nil), not a benign miss:
+		// log it so a confidential client silently downgrading to a failing public
+		// exchange leaves a breadcrumb, rather than surfacing only as an opaque
+		// invalid_client from the token endpoint.
+		if err != nil {
+			log.Printf("oauth: client lookup failed during callback for %s/%s; using public auth: %s",
+				ps.ServerURL, ps.ClientRef, err)
+		}
+		form.Set("client_id", ps.ClientID)
+	}
 
 	var tr tokenResponse
 	if err := postForm(ctx, do, server.TokenEndpoint, form, &tr); err != nil {

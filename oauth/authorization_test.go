@@ -315,7 +315,7 @@ func TestHandleCallback_SuccessfulExchange(t *testing.T) {
 		return jsonResponse(tokenResp), nil
 	}
 
-	entry, err := handleCallback(context.Background(), do, servers, pending, tokens, "state-1", "auth-code-1")
+	entry, err := handleCallback(context.Background(), do, servers, pending, tokens, newFakeClientStore(), "state-1", "auth-code-1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -390,7 +390,7 @@ func TestHandleCallback_UnknownState(t *testing.T) {
 		return nil, nil
 	}
 
-	_, err := handleCallback(context.Background(), do, servers, pending, tokens, "missing", "code")
+	_, err := handleCallback(context.Background(), do, servers, pending, tokens, newFakeClientStore(), "missing", "code")
 	if err == nil {
 		t.Fatal("expected error for unknown/expired state")
 	}
@@ -411,10 +411,11 @@ func TestHandleCallback_EmptyStateOrCode(t *testing.T) {
 		return nil, nil
 	}
 
-	if _, err := handleCallback(context.Background(), do, servers, pending, tokens, "", "code"); !errors.IsInvalidArgument(err) {
+	clients := newFakeClientStore()
+	if _, err := handleCallback(context.Background(), do, servers, pending, tokens, clients, "", "code"); !errors.IsInvalidArgument(err) {
 		t.Errorf("empty state: expected InvalidArgument, got %v", err)
 	}
-	if _, err := handleCallback(context.Background(), do, servers, pending, tokens, "state", ""); !errors.IsInvalidArgument(err) {
+	if _, err := handleCallback(context.Background(), do, servers, pending, tokens, clients, "state", ""); !errors.IsInvalidArgument(err) {
 		t.Errorf("empty code: expected InvalidArgument, got %v", err)
 	}
 }
@@ -438,7 +439,7 @@ func TestHandleCallback_ExchangeFailureKeepsPending(t *testing.T) {
 		return statusResponse(http.StatusBadRequest), nil
 	}
 
-	_, err := handleCallback(context.Background(), do, servers, pending, tokens, "state-1", "auth-code-1")
+	_, err := handleCallback(context.Background(), do, servers, pending, tokens, newFakeClientStore(), "state-1", "auth-code-1")
 	if err == nil {
 		t.Fatal("expected error when token exchange fails")
 	}
@@ -471,7 +472,7 @@ func TestHandleCallback_NoAccessToken(t *testing.T) {
 		return jsonResponse(`{"token_type":"Bearer","expires_in":3600}`), nil
 	}
 
-	_, err := handleCallback(context.Background(), do, servers, pending, tokens, "state-1", "auth-code-1")
+	_, err := handleCallback(context.Background(), do, servers, pending, tokens, newFakeClientStore(), "state-1", "auth-code-1")
 	if err == nil {
 		t.Fatal("expected error when response has no access_token")
 	}
@@ -504,7 +505,7 @@ func TestHandleCallback_ExpiredPendingState(t *testing.T) {
 		return nil, nil
 	}
 
-	_, err := handleCallback(context.Background(), do, servers, pending, tokens, "state-1", "auth-code-1")
+	_, err := handleCallback(context.Background(), do, servers, pending, tokens, newFakeClientStore(), "state-1", "auth-code-1")
 	if !errors.IsNotFound(err) {
 		t.Fatalf("expected NotFound for expired state, got %v", err)
 	}
@@ -571,7 +572,7 @@ func TestHandleCallback_ClientRefRoundTrip(t *testing.T) {
 	}
 
 	do := func(_ *http.Request) (*http.Response, error) { return jsonResponse(tokenResp), nil }
-	entry, err := handleCallback(context.Background(), do, servers, pending, tokens, params.State, "auth-code-1")
+	entry, err := handleCallback(context.Background(), do, servers, pending, tokens, clients, params.State, "auth-code-1")
 	if err != nil {
 		t.Fatalf("callback: %v", err)
 	}
@@ -587,6 +588,124 @@ func TestHandleCallback_ClientRefRoundTrip(t *testing.T) {
 	}
 	if _, ok := tokens.entries[TokenKey{ServerURL: "https://api.example.com", AccountID: "acct-1"}]; ok {
 		t.Error("token must not be stored under the dynamic (empty ClientRef) key")
+	}
+}
+
+// A confidential client must present client_secret on the auth-code exchange.
+// handleCallback looks the ClientEntry up by ps.ClientRef and, when its ClientID
+// matches the one bound into the pending state, attaches client_secret_post.
+func TestHandleCallback_ConfidentialSendsSecret(t *testing.T) {
+	servers := newFakeServerCache()
+	servers.entries["https://api.example.com"] = authServer()
+	clients := newFakeClientStore()
+	clients.entries[ckey("https://api.example.com", "tenant-a")] = &ClientEntry{
+		ClientID: "client-tenant-a", ClientSecret: "s3cret", ClientType: ClientTypeConfidential,
+	}
+	pending := newFakePendingStore()
+	seedPending(pending, "state-1", &PendingAuthState{
+		ServerURL:    "https://api.example.com",
+		ClientRef:    "tenant-a",
+		AccountID:    "acct-1",
+		ClientID:     "client-tenant-a",
+		CodeVerifier: "verifier-xyz",
+		RedirectURI:  "https://app.example.com/callback",
+	})
+	tokens := newFakeTokenWriter()
+
+	var sentForm url.Values
+	do := func(req *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(req.Body)
+		sentForm, _ = url.ParseQuery(string(body))
+		return jsonResponse(tokenResp), nil
+	}
+
+	if _, err := handleCallback(context.Background(), do, servers, pending, tokens, clients, "state-1", "auth-code-1"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sentForm.Get("client_id") != "client-tenant-a" {
+		t.Errorf("client_id = %q", sentForm.Get("client_id"))
+	}
+	if sentForm.Get("client_secret") != "s3cret" {
+		t.Errorf("confidential exchange must send client_secret, got %q", sentForm.Get("client_secret"))
+	}
+}
+
+// A public client must not present client_secret on the auth-code exchange.
+func TestHandleCallback_PublicNoSecret(t *testing.T) {
+	servers := newFakeServerCache()
+	servers.entries["https://api.example.com"] = authServer()
+	clients := newFakeClientStore()
+	clients.entries[ckey("https://api.example.com", "tenant-a")] = &ClientEntry{
+		ClientID: "client-tenant-a", ClientType: ClientTypePublic,
+	}
+	pending := newFakePendingStore()
+	seedPending(pending, "state-1", &PendingAuthState{
+		ServerURL:    "https://api.example.com",
+		ClientRef:    "tenant-a",
+		AccountID:    "acct-1",
+		ClientID:     "client-tenant-a",
+		CodeVerifier: "verifier-xyz",
+		RedirectURI:  "https://app.example.com/callback",
+	})
+	tokens := newFakeTokenWriter()
+
+	var sentForm url.Values
+	do := func(req *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(req.Body)
+		sentForm, _ = url.ParseQuery(string(body))
+		return jsonResponse(tokenResp), nil
+	}
+
+	if _, err := handleCallback(context.Background(), do, servers, pending, tokens, clients, "state-1", "auth-code-1"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sentForm.Get("client_id") != "client-tenant-a" {
+		t.Errorf("client_id = %q", sentForm.Get("client_id"))
+	}
+	if sentForm.Has("client_secret") {
+		t.Errorf("public exchange must not send client_secret, got %q", sentForm.Get("client_secret"))
+	}
+}
+
+// If the looked-up client's ClientID no longer matches the one bound into the
+// pending state (e.g. a re-registration rotated it mid-flow), handleCallback
+// falls back to public auth: it sends the pending-state client_id only, never a
+// stale secret, and does not fail the exchange.
+func TestHandleCallback_ClientIDMismatchFallsBack(t *testing.T) {
+	servers := newFakeServerCache()
+	servers.entries["https://api.example.com"] = authServer()
+	clients := newFakeClientStore()
+	// The currently-registered client carries a different (rotated) client_id and
+	// a secret; neither must leak into the exchange bound to the old client_id.
+	clients.entries[ckey("https://api.example.com", "tenant-a")] = &ClientEntry{
+		ClientID: "client-NEW", ClientSecret: "s3cret", ClientType: ClientTypeConfidential,
+	}
+	pending := newFakePendingStore()
+	seedPending(pending, "state-1", &PendingAuthState{
+		ServerURL:    "https://api.example.com",
+		ClientRef:    "tenant-a",
+		AccountID:    "acct-1",
+		ClientID:     "client-OLD",
+		CodeVerifier: "verifier-xyz",
+		RedirectURI:  "https://app.example.com/callback",
+	})
+	tokens := newFakeTokenWriter()
+
+	var sentForm url.Values
+	do := func(req *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(req.Body)
+		sentForm, _ = url.ParseQuery(string(body))
+		return jsonResponse(tokenResp), nil
+	}
+
+	if _, err := handleCallback(context.Background(), do, servers, pending, tokens, clients, "state-1", "auth-code-1"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sentForm.Get("client_id") != "client-OLD" {
+		t.Errorf("client_id must come from the pending state on mismatch, got %q", sentForm.Get("client_id"))
+	}
+	if sentForm.Has("client_secret") {
+		t.Errorf("must not send a stale secret on client_id mismatch, got %q", sentForm.Get("client_secret"))
 	}
 }
 

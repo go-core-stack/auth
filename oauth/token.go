@@ -53,6 +53,22 @@ type tokenDeleter interface {
 	DeleteByFilter(ctx context.Context, filter any) (int64, error)
 }
 
+// attachClientAuth sets the client authentication parameters on a token-endpoint
+// request form. It always sends client_id; for a confidential client carrying a
+// non-empty secret it additionally sends client_secret (the client_secret_post
+// method, RFC 6749 §2.3.1). A public client — or a confidential client whose
+// secret is empty — sends client_id only.
+//
+// This is the single chokepoint the auth-code exchange, token refresh, and token
+// revocation paths all route through, so adding client_secret_basic (HTTP Basic)
+// later is a localized change here rather than at three call sites.
+func attachClientAuth(form url.Values, client *ClientEntry) {
+	form.Set("client_id", client.ClientID)
+	if client.ClientType == ClientTypeConfidential && client.ClientSecret != "" {
+		form.Set("client_secret", client.ClientSecret)
+	}
+}
+
 // oauthErrorResponse is the RFC 6749 §5.2 token-endpoint error response. Parsed
 // to classify a non-2xx refresh outcome as permanent vs transient.
 type oauthErrorResponse struct {
@@ -271,7 +287,7 @@ func refreshTokenExchange(ctx context.Context, do httpDoFunc, servers serverCach
 	form := url.Values{}
 	form.Set("grant_type", grantTypeRefreshToken)
 	form.Set("refresh_token", entry.RefreshToken)
-	form.Set("client_id", client.ClientID)
+	attachClientAuth(form, client)
 	// Deliberately omit `scope`: per RFC 6749 §6 an omitted scope means the new
 	// token keeps exactly the scope originally granted — the same result echoing
 	// the stored scopes would aim for, but without tripping authorization servers
@@ -395,7 +411,7 @@ func revokeAtServer(ctx context.Context, do httpDoFunc, servers serverCache, cli
 		return err
 	}
 	if client != nil {
-		form.Set("client_id", client.ClientID)
+		attachClientAuth(form, client)
 	}
 
 	return postRevocation(ctx, do, server.RevocationEndpoint, form)
