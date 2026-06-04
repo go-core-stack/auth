@@ -267,6 +267,16 @@ func registerStaticClient(ctx context.Context, clients clientStore, serverURL, c
 	entry.RegistrationType = RegistrationTypeStatic
 	entry.RegisteredAt = time.Now().Unix()
 
+	// Derive ClientType from secret presence — do not trust the consumer. A
+	// static client with a (non-whitespace) secret is confidential; otherwise
+	// it is public. This derivation is authoritative and overwrites any
+	// ClientType the consumer supplied.
+	if strings.TrimSpace(entry.ClientSecret) != "" {
+		entry.ClientType = ClientTypeConfidential
+	} else {
+		entry.ClientType = ClientTypePublic
+	}
+
 	// Upsert so a static client can be re-provisioned (e.g. rotated secret)
 	// without a separate delete. Sensitive fields are encrypted at rest by
 	// ClientEntry.MarshalBSON, exactly as on the dynamic path.
