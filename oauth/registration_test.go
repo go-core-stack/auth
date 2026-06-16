@@ -412,6 +412,198 @@ func TestRegisterDynamicClient_NoRegistrationEndpoint(t *testing.T) {
 	}
 }
 
+// --- RegistrationEndpoint override tests ---
+
+// When RegistrationEndpoint is set, performRegistration must POST to it instead
+// of the discovered endpoint.
+func TestRegisterDynamicClient_ExplicitRegistrationEndpoint(t *testing.T) {
+	locks := &fakeRegistrationLocks{}
+	clients := newFakeClientStore()
+
+	var sawURL string
+	do := func(req *http.Request) (*http.Response, error) {
+		sawURL = req.URL.String()
+		return jsonResponse(regResp), nil
+	}
+
+	entry, err := registerDynamicClient(context.Background(), do, clients, locks,
+		staticDiscover(discoveredServer()), testConfig(),
+		RegisterClientOptions{
+			ServerURL:            "https://api.example.com",
+			RegistrationEndpoint: "https://custom.example.com/register",
+		})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if entry.ClientID != "client-abc" {
+		t.Errorf("client id = %q", entry.ClientID)
+	}
+	if sawURL != "https://custom.example.com/register" {
+		t.Errorf("registration POST URL = %q, want https://custom.example.com/register", sawURL)
+	}
+}
+
+// When the discovered server has no registration endpoint but the caller
+// supplies one via RegistrationEndpoint, registration must succeed.
+func TestRegisterDynamicClient_ExplicitEndpointRescuesNoDiscovery(t *testing.T) {
+	locks := &fakeRegistrationLocks{}
+	clients := newFakeClientStore()
+
+	var sawURL string
+	do := func(req *http.Request) (*http.Response, error) {
+		sawURL = req.URL.String()
+		return jsonResponse(regResp), nil
+	}
+
+	// Discovery yields no registration endpoint — this would normally fail.
+	noRegServer := &ServerEntry{TokenEndpoint: "https://as.example.com/token"}
+
+	entry, err := registerDynamicClient(context.Background(), do, clients, locks,
+		staticDiscover(noRegServer), testConfig(),
+		RegisterClientOptions{
+			ServerURL:            "https://api.example.com",
+			RegistrationEndpoint: "https://custom.example.com/register",
+		})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if entry.ClientID != "client-abc" {
+		t.Errorf("client id = %q", entry.ClientID)
+	}
+	if sawURL != "https://custom.example.com/register" {
+		t.Errorf("registration POST URL = %q, want https://custom.example.com/register", sawURL)
+	}
+}
+
+// --- InitialAccessToken tests ---
+
+// When InitialAccessToken is set, the registration request must carry an
+// Authorization: Bearer header.
+func TestRegisterDynamicClient_InitialAccessToken(t *testing.T) {
+	locks := &fakeRegistrationLocks{}
+	clients := newFakeClientStore()
+
+	var sawAuthHeader string
+	do := func(req *http.Request) (*http.Response, error) {
+		sawAuthHeader = req.Header.Get("Authorization")
+		return jsonResponse(regResp), nil
+	}
+
+	entry, err := registerDynamicClient(context.Background(), do, clients, locks,
+		staticDiscover(discoveredServer()), testConfig(),
+		RegisterClientOptions{
+			ServerURL:          "https://api.example.com",
+			InitialAccessToken: "iat-secret-token",
+		})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if entry.ClientID != "client-abc" {
+		t.Errorf("client id = %q", entry.ClientID)
+	}
+	if sawAuthHeader != "Bearer iat-secret-token" {
+		t.Errorf("Authorization header = %q, want %q", sawAuthHeader, "Bearer iat-secret-token")
+	}
+}
+
+// When InitialAccessToken is NOT set, the registration request must NOT carry
+// an Authorization header.
+func TestRegisterDynamicClient_NoInitialAccessToken_NoAuthHeader(t *testing.T) {
+	locks := &fakeRegistrationLocks{}
+	clients := newFakeClientStore()
+
+	var sawAuthHeader string
+	do := func(req *http.Request) (*http.Response, error) {
+		sawAuthHeader = req.Header.Get("Authorization")
+		return jsonResponse(regResp), nil
+	}
+
+	_, err := registerDynamicClient(context.Background(), do, clients, locks,
+		staticDiscover(discoveredServer()), testConfig(),
+		RegisterClientOptions{ServerURL: "https://api.example.com"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sawAuthHeader != "" {
+		t.Errorf("Authorization header = %q, want empty (no initial access token)", sawAuthHeader)
+	}
+}
+
+// Both RegistrationEndpoint and InitialAccessToken set: the request must POST
+// to the explicit endpoint with the Bearer header.
+func TestRegisterDynamicClient_ExplicitEndpointAndInitialAccessToken(t *testing.T) {
+	locks := &fakeRegistrationLocks{}
+	clients := newFakeClientStore()
+
+	var sawURL string
+	var sawAuthHeader string
+	do := func(req *http.Request) (*http.Response, error) {
+		sawURL = req.URL.String()
+		sawAuthHeader = req.Header.Get("Authorization")
+		return jsonResponse(regResp), nil
+	}
+
+	noRegServer := &ServerEntry{TokenEndpoint: "https://as.example.com/token"}
+
+	entry, err := registerDynamicClient(context.Background(), do, clients, locks,
+		staticDiscover(noRegServer), testConfig(),
+		RegisterClientOptions{
+			ServerURL:            "https://api.example.com",
+			RegistrationEndpoint: "https://custom.example.com/register",
+			InitialAccessToken:   "iat-token-42",
+		})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if entry.ClientID != "client-abc" {
+		t.Errorf("client id = %q", entry.ClientID)
+	}
+	if sawURL != "https://custom.example.com/register" {
+		t.Errorf("registration POST URL = %q, want https://custom.example.com/register", sawURL)
+	}
+	if sawAuthHeader != "Bearer iat-token-42" {
+		t.Errorf("Authorization header = %q, want %q", sawAuthHeader, "Bearer iat-token-42")
+	}
+}
+
+// ReRegisterClient must respect RegistrationEndpoint and InitialAccessToken
+// identically to RegisterDynamicClient (it delegates to performRegistration).
+func TestReRegisterClient_RespectsExplicitEndpointAndToken(t *testing.T) {
+	locks := &fakeRegistrationLocks{}
+	clients := newFakeClientStore()
+	clients.entries["https://api.example.com"] = &ClientEntry{ClientID: "stale"}
+
+	var sawURL string
+	var sawAuthHeader string
+	do := func(req *http.Request) (*http.Response, error) {
+		sawURL = req.URL.String()
+		sawAuthHeader = req.Header.Get("Authorization")
+		return jsonResponse(regResp), nil
+	}
+
+	noRegServer := &ServerEntry{TokenEndpoint: "https://as.example.com/token"}
+
+	entry, err := reRegisterClient(context.Background(), do, clients, locks,
+		staticDiscover(noRegServer), testConfig(),
+		RegisterClientOptions{
+			ServerURL:            "https://api.example.com",
+			RegistrationEndpoint: "https://custom.example.com/register",
+			InitialAccessToken:   "iat-re-register",
+		})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if entry.ClientID != "client-abc" {
+		t.Errorf("expected freshly-registered client, got %q", entry.ClientID)
+	}
+	if sawURL != "https://custom.example.com/register" {
+		t.Errorf("re-registration POST URL = %q, want https://custom.example.com/register", sawURL)
+	}
+	if sawAuthHeader != "Bearer iat-re-register" {
+		t.Errorf("Authorization header = %q, want %q", sawAuthHeader, "Bearer iat-re-register")
+	}
+}
+
 func TestReRegisterClient_DeletesThenRegisters(t *testing.T) {
 	locks := &fakeRegistrationLocks{}
 	clients := newFakeClientStore()
@@ -1008,5 +1200,35 @@ func TestMergeRegisterOptions_DefaultsAndOverrides(t *testing.T) {
 	}
 	if strings.Join(got.Scopes, ",") != "openid" {
 		t.Errorf("override Scopes = %v", got.Scopes)
+	}
+}
+
+// RegistrationEndpoint and InitialAccessToken must propagate through merge
+// unchanged (no config-level defaults).
+func TestMergeRegisterOptions_PropagatesEndpointAndToken(t *testing.T) {
+	cfg := testConfig()
+
+	// When set, both fields pass through.
+	got := mergeRegisterOptions(cfg, RegisterClientOptions{
+		ServerURL:            "https://api.example.com",
+		RegistrationEndpoint: "https://custom.example.com/register",
+		InitialAccessToken:   "iat-abc",
+	})
+	if got.RegistrationEndpoint != "https://custom.example.com/register" {
+		t.Errorf("RegistrationEndpoint = %q, want https://custom.example.com/register", got.RegistrationEndpoint)
+	}
+	if got.InitialAccessToken != "iat-abc" {
+		t.Errorf("InitialAccessToken = %q, want iat-abc", got.InitialAccessToken)
+	}
+
+	// When not set, both remain empty (no defaults from config).
+	got = mergeRegisterOptions(cfg, RegisterClientOptions{
+		ServerURL: "https://api.example.com",
+	})
+	if got.RegistrationEndpoint != "" {
+		t.Errorf("RegistrationEndpoint = %q, want empty (no config default)", got.RegistrationEndpoint)
+	}
+	if got.InitialAccessToken != "" {
+		t.Errorf("InitialAccessToken = %q, want empty (no config default)", got.InitialAccessToken)
 	}
 }
