@@ -230,6 +230,18 @@ type RegisterClientOptions struct {
 	RedirectURIs []string // defaults to []string{OAuthConfig.RedirectURI}
 	Scopes       []string // defaults to OAuthConfig.Scopes
 	// GrantTypes defaults to ["authorization_code", "refresh_token"]
+
+	// RegistrationEndpoint, when non-empty, is used directly as the RFC 7591
+	// registration endpoint, bypassing the discovered
+	// ServerEntry.RegistrationEndpoint. This supports providers that expose a
+	// registration endpoint but do not advertise it via .well-known metadata.
+	RegistrationEndpoint string
+
+	// InitialAccessToken, when non-empty, is sent as an Authorization: Bearer
+	// header on the RFC 7591 registration request, per RFC 7591 §3.1. This
+	// supports providers that require an initial access token to create a
+	// client.
+	InitialAccessToken string
 }
 
 // AuthorizeOptions parameterizes generation of an authorization request.

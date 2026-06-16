@@ -211,14 +211,23 @@ func reRegisterClient(ctx context.Context, do httpDoFunc, clients clientStore, l
 // should be returned from cache first (fast-path / double-check, or a delete for
 // re-registration).
 func performRegistration(ctx context.Context, do httpDoFunc, clients clientStore, discover discoverFunc, merged RegisterClientOptions, normalized, clientRef string) (*ClientEntry, error) {
-	// Ensure we have server metadata, specifically the registration endpoint.
+	// Resolve the registration endpoint: prefer the caller-supplied override,
+	// fall back to the discovered metadata.
+	endpoint := merged.RegistrationEndpoint
+
+	// Always run discovery to obtain other metadata (TokenEndpoint,
+	// AuthorizationEndpoint, etc.) that the rest of the library needs.
 	server, err := discover(ctx, normalized)
 	if err != nil {
 		return nil, err
 	}
-	if server.RegistrationEndpoint == "" {
+
+	if endpoint == "" {
+		endpoint = server.RegistrationEndpoint
+	}
+	if endpoint == "" {
 		return nil, errors.Wrapf(errors.InvalidArgument,
-			"oauth: server %s does not advertise a registration endpoint", normalized)
+			"oauth: no registration endpoint for %s (not in caller options and not discovered)", normalized)
 	}
 
 	// RFC 7591 dynamic registration for a public client.
@@ -230,10 +239,21 @@ func performRegistration(ctx context.Context, do httpDoFunc, clients clientStore
 		TokenEndpointAuthMethod: TokenEndpointAuthMethodNone,
 		Scope:                   strings.Join(merged.Scopes, " "),
 	}
+
 	var resp clientRegistrationResponse
-	if err := postJSON(ctx, do, server.RegistrationEndpoint, &reqBody, &resp); err != nil {
-		return nil, errors.Wrapf(errors.GetErrCode(err),
-			"oauth: dynamic client registration failed for %s: %s", normalized, err)
+	if merged.InitialAccessToken != "" {
+		// When an initial access token is required, attach the Bearer header
+		// via postJSONWithAuth (which shares the core logic with postJSON via
+		// doPostJSON). See RFC 7591 §3.1.
+		if err := postJSONWithAuth(ctx, do, endpoint, merged.InitialAccessToken, &reqBody, &resp); err != nil {
+			return nil, errors.Wrapf(errors.GetErrCode(err),
+				"oauth: dynamic client registration failed for %s: %s", normalized, err)
+		}
+	} else {
+		if err := postJSON(ctx, do, endpoint, &reqBody, &resp); err != nil {
+			return nil, errors.Wrapf(errors.GetErrCode(err),
+				"oauth: dynamic client registration failed for %s: %s", normalized, err)
+		}
 	}
 	if resp.ClientID == "" {
 		return nil, errors.Wrapf(errors.InvalidArgument,
@@ -386,7 +406,8 @@ func findClient(ctx context.Context, clients clientStore, normalized, clientRef 
 
 // mergeRegisterOptions fills unset RegisterClientOptions fields from the manager
 // configuration: ClientName, RedirectURIs (from the single RedirectURI), and
-// Scopes.
+// Scopes. RegistrationEndpoint and InitialAccessToken are per-call fields with
+// no config-level defaults — they are copied through unchanged.
 func mergeRegisterOptions(cfg OAuthConfig, opts RegisterClientOptions) RegisterClientOptions {
 	merged := opts
 	if merged.ClientName == "" {
@@ -398,6 +419,8 @@ func mergeRegisterOptions(cfg OAuthConfig, opts RegisterClientOptions) RegisterC
 	if len(merged.Scopes) == 0 {
 		merged.Scopes = cfg.Scopes
 	}
+	// RegistrationEndpoint and InitialAccessToken are per-call overrides with
+	// no config-level defaults; they propagate via the struct copy above.
 	return merged
 }
 
@@ -410,11 +433,13 @@ func preferStrings(primary, fallback []string) []string {
 	return fallback
 }
 
-// postJSON marshals payload, POSTs it as application/json, and decodes a JSON
-// response body into out, wrapping network, HTTP-status, and parse failures with
-// core/errors codes. The response body is bounded by maxMetadataBytes (defined
-// in discovery.go) so a hostile server cannot exhaust memory.
-func postJSON(ctx context.Context, do httpDoFunc, url string, payload, out any) error {
+// doPostJSON is the shared implementation for posting JSON payloads. It marshals
+// payload, POSTs it as application/json, applies any extra headers from the map,
+// and decodes a JSON response body into out, wrapping network, HTTP-status, and
+// parse failures with core/errors codes. The response body is bounded by
+// maxMetadataBytes (defined in discovery.go) so a hostile server cannot exhaust
+// memory.
+func doPostJSON(ctx context.Context, do httpDoFunc, url string, extraHeaders map[string]string, payload, out any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return errors.Wrapf(errors.InvalidArgument, "oauth: failed to encode request for %s: %s", url, err)
@@ -425,6 +450,9 @@ func postJSON(ctx context.Context, do httpDoFunc, url string, payload, out any) 
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	for k, v := range extraHeaders {
+		req.Header.Set(k, v)
+	}
 
 	resp, err := do(req)
 	if err != nil {
@@ -451,4 +479,23 @@ func postJSON(ctx context.Context, do httpDoFunc, url string, payload, out any) 
 		return errors.Wrapf(errors.InvalidArgument, "oauth: failed to parse JSON from %s: %s", url, err)
 	}
 	return nil
+}
+
+// postJSON marshals payload, POSTs it as application/json, and decodes a JSON
+// response body into out, wrapping network, HTTP-status, and parse failures with
+// core/errors codes. The response body is bounded by maxMetadataBytes (defined
+// in discovery.go) so a hostile server cannot exhaust memory.
+//
+// Delegates to doPostJSON with no extra headers.
+func postJSON(ctx context.Context, do httpDoFunc, url string, payload, out any) error {
+	return doPostJSON(ctx, do, url, nil, payload, out)
+}
+
+// postJSONWithAuth is like postJSON but additionally sets an Authorization:
+// Bearer header on the outbound request. Used by performRegistration when the
+// caller supplies an InitialAccessToken per RFC 7591 §3.1.
+//
+// Delegates to doPostJSON with an Authorization header.
+func postJSONWithAuth(ctx context.Context, do httpDoFunc, url, bearerToken string, payload, out any) error {
+	return doPostJSON(ctx, do, url, map[string]string{"Authorization": "Bearer " + bearerToken}, payload, out)
 }
