@@ -242,9 +242,9 @@ func performRegistration(ctx context.Context, do httpDoFunc, clients clientStore
 
 	var resp clientRegistrationResponse
 	if merged.InitialAccessToken != "" {
-		// When an initial access token is required, build the HTTP request
-		// directly so the Authorization header is scoped to registration only
-		// (Option A from issue #42). This avoids changing postJSON's signature.
+		// When an initial access token is required, attach the Bearer header
+		// via postJSONWithAuth (which shares the core logic with postJSON via
+		// doPostJSON). See RFC 7591 §3.1.
 		if err := postJSONWithAuth(ctx, do, endpoint, merged.InitialAccessToken, &reqBody, &resp); err != nil {
 			return nil, errors.Wrapf(errors.GetErrCode(err),
 				"oauth: dynamic client registration failed for %s: %s", normalized, err)
@@ -433,11 +433,13 @@ func preferStrings(primary, fallback []string) []string {
 	return fallback
 }
 
-// postJSON marshals payload, POSTs it as application/json, and decodes a JSON
-// response body into out, wrapping network, HTTP-status, and parse failures with
-// core/errors codes. The response body is bounded by maxMetadataBytes (defined
-// in discovery.go) so a hostile server cannot exhaust memory.
-func postJSON(ctx context.Context, do httpDoFunc, url string, payload, out any) error {
+// doPostJSON is the shared implementation for posting JSON payloads. It marshals
+// payload, POSTs it as application/json, applies any extra headers from the map,
+// and decodes a JSON response body into out, wrapping network, HTTP-status, and
+// parse failures with core/errors codes. The response body is bounded by
+// maxMetadataBytes (defined in discovery.go) so a hostile server cannot exhaust
+// memory.
+func doPostJSON(ctx context.Context, do httpDoFunc, url string, extraHeaders map[string]string, payload, out any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return errors.Wrapf(errors.InvalidArgument, "oauth: failed to encode request for %s: %s", url, err)
@@ -448,6 +450,9 @@ func postJSON(ctx context.Context, do httpDoFunc, url string, payload, out any) 
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	for k, v := range extraHeaders {
+		req.Header.Set(k, v)
+	}
 
 	resp, err := do(req)
 	if err != nil {
@@ -476,45 +481,21 @@ func postJSON(ctx context.Context, do httpDoFunc, url string, payload, out any) 
 	return nil
 }
 
+// postJSON marshals payload, POSTs it as application/json, and decodes a JSON
+// response body into out, wrapping network, HTTP-status, and parse failures with
+// core/errors codes. The response body is bounded by maxMetadataBytes (defined
+// in discovery.go) so a hostile server cannot exhaust memory.
+//
+// Delegates to doPostJSON with no extra headers.
+func postJSON(ctx context.Context, do httpDoFunc, url string, payload, out any) error {
+	return doPostJSON(ctx, do, url, nil, payload, out)
+}
+
 // postJSONWithAuth is like postJSON but additionally sets an Authorization:
 // Bearer header on the outbound request. Used by performRegistration when the
-// caller supplies an InitialAccessToken per RFC 7591 §3.1. Keeping this as a
-// separate function (rather than adding an optional parameter to postJSON)
-// avoids touching postJSON's signature and keeps the auth concern local to
-// registration.
+// caller supplies an InitialAccessToken per RFC 7591 §3.1.
+//
+// Delegates to doPostJSON with an Authorization header.
 func postJSONWithAuth(ctx context.Context, do httpDoFunc, url, bearerToken string, payload, out any) error {
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return errors.Wrapf(errors.InvalidArgument, "oauth: failed to encode request for %s: %s", url, err)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return errors.Wrapf(errors.InvalidArgument, "oauth: failed to build request for %s: %s", url, err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", "Bearer "+bearerToken)
-
-	resp, err := do(req)
-	if err != nil {
-		return errors.Wrapf(errors.Unknown, "oauth: request to %s failed: %s", url, err)
-	}
-	limited := io.LimitReader(resp.Body, maxMetadataBytes)
-	defer func() {
-		_, _ = io.Copy(io.Discard, limited)
-		_ = resp.Body.Close()
-	}()
-
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return errors.Wrapf(errors.Unknown, "oauth: %s returned HTTP status %d", url, resp.StatusCode)
-	}
-
-	raw, err := io.ReadAll(limited)
-	if err != nil {
-		return errors.Wrapf(errors.Unknown, "oauth: failed to read response from %s: %s", url, err)
-	}
-	if err := json.Unmarshal(raw, out); err != nil {
-		return errors.Wrapf(errors.InvalidArgument, "oauth: failed to parse JSON from %s: %s", url, err)
-	}
-	return nil
+	return doPostJSON(ctx, do, url, map[string]string{"Authorization": "Bearer " + bearerToken}, payload, out)
 }
