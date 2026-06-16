@@ -211,14 +211,23 @@ func reRegisterClient(ctx context.Context, do httpDoFunc, clients clientStore, l
 // should be returned from cache first (fast-path / double-check, or a delete for
 // re-registration).
 func performRegistration(ctx context.Context, do httpDoFunc, clients clientStore, discover discoverFunc, merged RegisterClientOptions, normalized, clientRef string) (*ClientEntry, error) {
-	// Ensure we have server metadata, specifically the registration endpoint.
+	// Resolve the registration endpoint: prefer the caller-supplied override,
+	// fall back to the discovered metadata.
+	endpoint := merged.RegistrationEndpoint
+
+	// Always run discovery to obtain other metadata (TokenEndpoint,
+	// AuthorizationEndpoint, etc.) that the rest of the library needs.
 	server, err := discover(ctx, normalized)
 	if err != nil {
 		return nil, err
 	}
-	if server.RegistrationEndpoint == "" {
+
+	if endpoint == "" {
+		endpoint = server.RegistrationEndpoint
+	}
+	if endpoint == "" {
 		return nil, errors.Wrapf(errors.InvalidArgument,
-			"oauth: server %s does not advertise a registration endpoint", normalized)
+			"oauth: no registration endpoint for %s (not in caller options and not discovered)", normalized)
 	}
 
 	// RFC 7591 dynamic registration for a public client.
@@ -230,10 +239,21 @@ func performRegistration(ctx context.Context, do httpDoFunc, clients clientStore
 		TokenEndpointAuthMethod: TokenEndpointAuthMethodNone,
 		Scope:                   strings.Join(merged.Scopes, " "),
 	}
+
 	var resp clientRegistrationResponse
-	if err := postJSON(ctx, do, server.RegistrationEndpoint, &reqBody, &resp); err != nil {
-		return nil, errors.Wrapf(errors.GetErrCode(err),
-			"oauth: dynamic client registration failed for %s: %s", normalized, err)
+	if merged.InitialAccessToken != "" {
+		// When an initial access token is required, build the HTTP request
+		// directly so the Authorization header is scoped to registration only
+		// (Option A from issue #42). This avoids changing postJSON's signature.
+		if err := postJSONWithAuth(ctx, do, endpoint, merged.InitialAccessToken, &reqBody, &resp); err != nil {
+			return nil, errors.Wrapf(errors.GetErrCode(err),
+				"oauth: dynamic client registration failed for %s: %s", normalized, err)
+		}
+	} else {
+		if err := postJSON(ctx, do, endpoint, &reqBody, &resp); err != nil {
+			return nil, errors.Wrapf(errors.GetErrCode(err),
+				"oauth: dynamic client registration failed for %s: %s", normalized, err)
+		}
 	}
 	if resp.ClientID == "" {
 		return nil, errors.Wrapf(errors.InvalidArgument,
@@ -386,7 +406,8 @@ func findClient(ctx context.Context, clients clientStore, normalized, clientRef 
 
 // mergeRegisterOptions fills unset RegisterClientOptions fields from the manager
 // configuration: ClientName, RedirectURIs (from the single RedirectURI), and
-// Scopes.
+// Scopes. RegistrationEndpoint and InitialAccessToken are per-call fields with
+// no config-level defaults — they are copied through unchanged.
 func mergeRegisterOptions(cfg OAuthConfig, opts RegisterClientOptions) RegisterClientOptions {
 	merged := opts
 	if merged.ClientName == "" {
@@ -398,6 +419,8 @@ func mergeRegisterOptions(cfg OAuthConfig, opts RegisterClientOptions) RegisterC
 	if len(merged.Scopes) == 0 {
 		merged.Scopes = cfg.Scopes
 	}
+	// RegistrationEndpoint and InitialAccessToken are per-call overrides with
+	// no config-level defaults; they propagate via the struct copy above.
 	return merged
 }
 
@@ -433,6 +456,49 @@ func postJSON(ctx context.Context, do httpDoFunc, url string, payload, out any) 
 	// Share one maxMetadataBytes budget across the parse read and the deferred
 	// drain so the body can never read more than that in total, while still
 	// draining (bounded) on every path so the connection can be reused.
+	limited := io.LimitReader(resp.Body, maxMetadataBytes)
+	defer func() {
+		_, _ = io.Copy(io.Discard, limited)
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return errors.Wrapf(errors.Unknown, "oauth: %s returned HTTP status %d", url, resp.StatusCode)
+	}
+
+	raw, err := io.ReadAll(limited)
+	if err != nil {
+		return errors.Wrapf(errors.Unknown, "oauth: failed to read response from %s: %s", url, err)
+	}
+	if err := json.Unmarshal(raw, out); err != nil {
+		return errors.Wrapf(errors.InvalidArgument, "oauth: failed to parse JSON from %s: %s", url, err)
+	}
+	return nil
+}
+
+// postJSONWithAuth is like postJSON but additionally sets an Authorization:
+// Bearer header on the outbound request. Used by performRegistration when the
+// caller supplies an InitialAccessToken per RFC 7591 §3.1. Keeping this as a
+// separate function (rather than adding an optional parameter to postJSON)
+// avoids touching postJSON's signature and keeps the auth concern local to
+// registration.
+func postJSONWithAuth(ctx context.Context, do httpDoFunc, url, bearerToken string, payload, out any) error {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return errors.Wrapf(errors.InvalidArgument, "oauth: failed to encode request for %s: %s", url, err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return errors.Wrapf(errors.InvalidArgument, "oauth: failed to build request for %s: %s", url, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+bearerToken)
+
+	resp, err := do(req)
+	if err != nil {
+		return errors.Wrapf(errors.Unknown, "oauth: request to %s failed: %s", url, err)
+	}
 	limited := io.LimitReader(resp.Body, maxMetadataBytes)
 	defer func() {
 		_, _ = io.Copy(io.Discard, limited)
