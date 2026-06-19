@@ -59,6 +59,43 @@ type tokenResponse struct {
 	IDToken      string `json:"id_token"`
 }
 
+// tokenResponseMapperFunc is the function signature for the optional
+// TokenResponseMapper callback. It is defined here for readability in the
+// internal function signatures.
+type tokenResponseMapperFunc func(raw []byte) (*TokenResponse, error)
+
+// tokenResponseFromPublic converts a public TokenResponse (returned by a
+// consumer-supplied TokenResponseMapper) into the internal tokenResponse used
+// by the library's exchange and persistence logic.
+func tokenResponseFromPublic(pub *TokenResponse) tokenResponse {
+	return tokenResponse{
+		AccessToken:  pub.AccessToken,
+		TokenType:    pub.TokenType,
+		ExpiresIn:    pub.ExpiresIn,
+		RefreshToken: pub.RefreshToken,
+		Scope:        pub.Scope,
+		IDToken:      pub.IDToken,
+	}
+}
+
+// applyTokenResponseMapper calls the consumer-supplied mapper when the standard
+// token-endpoint parse yielded an empty AccessToken. It is the shared mapper
+// application logic used by both handleCallback and refreshTokenExchange.
+func applyTokenResponseMapper(mapper tokenResponseMapperFunc, raw []byte, tr *tokenResponse, serverURL string) error {
+	if tr.AccessToken != "" || mapper == nil {
+		return nil
+	}
+	mapped, err := mapper(raw)
+	if err != nil {
+		return errors.Wrapf(errors.InvalidArgument,
+			"oauth: token response mapper failed for %s: %s", serverURL, err)
+	}
+	if mapped != nil {
+		*tr = tokenResponseFromPublic(mapped)
+	}
+	return nil
+}
+
 // AuthorizationURL builds the Authorization Code + PKCE request parameters for a
 // remote server and persists the transient state needed to complete the flow. It
 // generates a PKCE verifier/challenge (S256) and a CSRF state token, stores a
@@ -87,7 +124,7 @@ func (m *OAuthManager) AuthorizationURL(ctx context.Context, opts AuthorizeOptio
 // authenticated session before calling this, and reject a mismatch, to prevent
 // login-CSRF / session-fixation.
 func (m *OAuthManager) HandleCallback(ctx context.Context, state string, code string) (*TokenEntry, error) {
-	return handleCallback(ctx, m.httpDo, m.serverTable, m.pendingTable, m.tokenTable, m.clientTable, state, code)
+	return handleCallback(ctx, m.httpDo, m.serverTable, m.pendingTable, m.tokenTable, m.clientTable, state, code, m.config.TokenResponseMapper)
 }
 
 // authorizationURL implements AuthorizationURL against the
@@ -176,7 +213,7 @@ func authorizationURL(ctx context.Context, servers serverCache, clients clientSt
 // pendingStore/serverCache/tokenWriter/clientStore/httpDoFunc interfaces so it is
 // unit-testable with fakes. The clientStore lets the exchange attach confidential
 // client authentication (client_secret_post) when the initiating client is one.
-func handleCallback(ctx context.Context, do httpDoFunc, servers serverCache, pending pendingStore, tokens tokenWriter, clients clientStore, state, code string) (*TokenEntry, error) {
+func handleCallback(ctx context.Context, do httpDoFunc, servers serverCache, pending pendingStore, tokens tokenWriter, clients clientStore, state, code string, mapper tokenResponseMapperFunc) (*TokenEntry, error) {
 	if strings.TrimSpace(state) == "" {
 		return nil, errors.Wrap(errors.InvalidArgument, "oauth: callback state must not be empty")
 	}
@@ -251,9 +288,13 @@ func handleCallback(ctx context.Context, do httpDoFunc, servers serverCache, pen
 	}
 
 	var tr tokenResponse
-	if err := postForm(ctx, do, server.TokenEndpoint, form, &tr); err != nil {
+	raw, err := postForm(ctx, do, server.TokenEndpoint, form, &tr)
+	if err != nil {
 		return nil, errors.Wrapf(errors.GetErrCode(err),
 			"oauth: authorization code exchange failed for %s: %s", ps.ServerURL, err)
+	}
+	if err := applyTokenResponseMapper(mapper, raw, &tr, ps.ServerURL); err != nil {
+		return nil, err
 	}
 	if tr.AccessToken == "" {
 		return nil, errors.Wrapf(errors.InvalidArgument,
@@ -351,18 +392,19 @@ func codeChallengeS256(verifier string) string {
 // core/errors codes. The token endpoint takes form-encoded input (RFC 6749
 // §4.1.3) but returns JSON (§5.1). The response body is bounded by
 // maxMetadataBytes (defined in discovery.go) so a hostile server cannot exhaust
-// memory.
-func postForm(ctx context.Context, do httpDoFunc, endpoint string, form url.Values, out any) error {
+// memory. The raw response bytes are returned alongside so callers can apply a
+// TokenResponseMapper when the standard parse yields an empty access_token.
+func postForm(ctx context.Context, do httpDoFunc, endpoint string, form url.Values, out any) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
-		return errors.Wrapf(errors.InvalidArgument, "oauth: failed to build request for %s: %s", endpoint, err)
+		return nil, errors.Wrapf(errors.InvalidArgument, "oauth: failed to build request for %s: %s", endpoint, err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := do(req)
 	if err != nil {
-		return errors.Wrapf(errors.Unknown, "oauth: request to %s failed: %s", endpoint, err)
+		return nil, errors.Wrapf(errors.Unknown, "oauth: request to %s failed: %s", endpoint, err)
 	}
 	// Share one maxMetadataBytes budget across the parse read and the deferred
 	// drain so the body can never read more than that in total, while still
@@ -374,15 +416,15 @@ func postForm(ctx context.Context, do httpDoFunc, endpoint string, form url.Valu
 	}()
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return errors.Wrapf(errors.Unknown, "oauth: %s returned HTTP status %d", endpoint, resp.StatusCode)
+		return nil, errors.Wrapf(errors.Unknown, "oauth: %s returned HTTP status %d", endpoint, resp.StatusCode)
 	}
 
 	raw, err := io.ReadAll(limited)
 	if err != nil {
-		return errors.Wrapf(errors.Unknown, "oauth: failed to read response from %s: %s", endpoint, err)
+		return nil, errors.Wrapf(errors.Unknown, "oauth: failed to read response from %s: %s", endpoint, err)
 	}
 	if err := json.Unmarshal(raw, out); err != nil {
-		return errors.Wrapf(errors.InvalidArgument, "oauth: failed to parse JSON from %s: %s", endpoint, err)
+		return nil, errors.Wrapf(errors.InvalidArgument, "oauth: failed to parse JSON from %s: %s", endpoint, err)
 	}
-	return nil
+	return raw, nil
 }

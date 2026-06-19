@@ -209,6 +209,19 @@ type TokenRefreshLockKey struct {
 
 // --- options / params ---
 
+// TokenResponse is the public representation of an OAuth token-endpoint
+// response. It is the return type of TokenResponseMapper, allowing consumers
+// to normalize provider-specific JSON structures into the standard fields the
+// library expects. The fields mirror the RFC 6749 §5.1 access-token response.
+type TokenResponse struct {
+	AccessToken  string `json:"access_token"`
+	TokenType    string `json:"token_type"`
+	ExpiresIn    int64  `json:"expires_in"`
+	RefreshToken string `json:"refresh_token"`
+	Scope        string `json:"scope"`
+	IDToken      string `json:"id_token"`
+}
+
 // OAuthConfig configures an OAuthManager. Only RedirectURI is conceptually
 // required for flows; the remaining fields carry sensible defaults.
 type OAuthConfig struct {
@@ -217,6 +230,16 @@ type OAuthConfig struct {
 	ClientName   string       // for dynamic registration metadata
 	EncryptorKey string       // optional, falls back to ENCRYPTOR_KEY env
 	HTTPClient   *http.Client // optional, defaults to 30s-timeout client
+
+	// TokenResponseMapper, when set, is called when a token-endpoint response
+	// does not contain a top-level access_token (per RFC 6749 §5.1). It
+	// receives the raw JSON response body and returns a normalized
+	// TokenResponse with AccessToken populated from wherever the provider
+	// nests it. This supports providers (e.g. Slack) whose token responses
+	// embed the access token inside a provider-specific object rather than at
+	// the top level. If not set, the library requires a top-level
+	// access_token and returns an error when it is absent.
+	TokenResponseMapper func(raw []byte) (*TokenResponse, error)
 }
 
 // RegisterClientOptions parameterizes dynamic client registration.
