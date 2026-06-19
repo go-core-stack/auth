@@ -59,34 +59,22 @@ type tokenResponse struct {
 	IDToken      string `json:"id_token"`
 }
 
-// tokenResponseMappers is the type for the optional per-server-URL mapper map.
-// It is defined here for readability in the internal function signatures.
-type tokenResponseMappers map[string]func(raw []byte) (*TokenResponse, error)
-
-// tokenResponseFromPublic converts a public TokenResponse (returned by a
-// consumer-supplied TokenResponseMapper) into the internal tokenResponse used
-// by the library's exchange and persistence logic.
-func tokenResponseFromPublic(pub *TokenResponse) tokenResponse {
-	return tokenResponse{
-		AccessToken:  pub.AccessToken,
-		TokenType:    pub.TokenType,
-		ExpiresIn:    pub.ExpiresIn,
-		RefreshToken: pub.RefreshToken,
-		Scope:        pub.Scope,
-		IDToken:      pub.IDToken,
-	}
-}
-
 // applyTokenResponseMapper looks up the consumer-supplied mapper for the given
 // serverURL and calls it when the standard token-endpoint parse yielded an empty
 // AccessToken. It is the shared mapper application logic used by both
 // handleCallback and refreshTokenExchange.
-func applyTokenResponseMapper(mappers tokenResponseMappers, raw []byte, tr *tokenResponse, serverURL string) error {
+//
+// When the mapper returns a non-nil *TokenResponse, its fields are merged
+// field-by-field: only non-zero values overwrite the corresponding field in tr.
+// This preserves fields the standard JSON parse already populated correctly
+// (e.g. token_type, expires_in) when the mapper only extracts the missing piece
+// (e.g. access_token from a provider-specific nested object).
+func applyTokenResponseMapper(mappers *TokenResponseMappers, raw []byte, tr *tokenResponse, serverURL string) error {
 	if tr.AccessToken != "" || mappers == nil {
 		return nil
 	}
-	mapper, ok := mappers[serverURL]
-	if !ok || mapper == nil {
+	mapper := mappers.lookup(serverURL)
+	if mapper == nil {
 		return nil
 	}
 	mapped, err := mapper(raw)
@@ -95,7 +83,24 @@ func applyTokenResponseMapper(mappers tokenResponseMappers, raw []byte, tr *toke
 			"oauth: token response mapper failed for %s: %s", serverURL, err)
 	}
 	if mapped != nil {
-		*tr = tokenResponseFromPublic(mapped)
+		if mapped.AccessToken != "" {
+			tr.AccessToken = mapped.AccessToken
+		}
+		if mapped.TokenType != "" {
+			tr.TokenType = mapped.TokenType
+		}
+		if mapped.ExpiresIn != 0 {
+			tr.ExpiresIn = mapped.ExpiresIn
+		}
+		if mapped.RefreshToken != "" {
+			tr.RefreshToken = mapped.RefreshToken
+		}
+		if mapped.Scope != "" {
+			tr.Scope = mapped.Scope
+		}
+		if mapped.IDToken != "" {
+			tr.IDToken = mapped.IDToken
+		}
 	}
 	return nil
 }
@@ -217,7 +222,7 @@ func authorizationURL(ctx context.Context, servers serverCache, clients clientSt
 // pendingStore/serverCache/tokenWriter/clientStore/httpDoFunc interfaces so it is
 // unit-testable with fakes. The clientStore lets the exchange attach confidential
 // client authentication (client_secret_post) when the initiating client is one.
-func handleCallback(ctx context.Context, do httpDoFunc, servers serverCache, pending pendingStore, tokens tokenWriter, clients clientStore, state, code string, mappers tokenResponseMappers) (*TokenEntry, error) {
+func handleCallback(ctx context.Context, do httpDoFunc, servers serverCache, pending pendingStore, tokens tokenWriter, clients clientStore, state, code string, mappers *TokenResponseMappers) (*TokenEntry, error) {
 	if strings.TrimSpace(state) == "" {
 		return nil, errors.Wrap(errors.InvalidArgument, "oauth: callback state must not be empty")
 	}

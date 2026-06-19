@@ -265,7 +265,7 @@ func lockedRefresh(ctx context.Context, tokens tokenStore, locks refreshLockerAP
 // client and builds the refreshed TokenEntry. A missing refresh token, or an
 // invalid_grant / invalid_client response, is a permanent failure
 // (errPermanentRefresh); other failures are transient.
-func refreshTokenExchange(ctx context.Context, do httpDoFunc, servers serverCache, clients clientStore, key *TokenKey, entry *TokenEntry, mappers tokenResponseMappers) (*TokenEntry, error) {
+func refreshTokenExchange(ctx context.Context, do httpDoFunc, servers serverCache, clients clientStore, key *TokenKey, entry *TokenEntry, mappers *TokenResponseMappers) (*TokenEntry, error) {
 	if entry.RefreshPolicy == RefreshPolicyNoRefresh {
 		// The server issued a non-refreshable token (e.g. an offline token with
 		// no expiry). There is nothing to refresh — a normal terminal state, not
@@ -313,7 +313,11 @@ func refreshTokenExchange(ctx context.Context, do httpDoFunc, servers serverCach
 		return nil, err
 	}
 	if err := applyTokenResponseMapper(mappers, raw, tr, key.ServerURL); err != nil {
-		return nil, err
+		// A mapper failure is a programmer error in the consumer-supplied
+		// function — it is not transient and will not fix itself. Classify it
+		// as permanent so the reconciler revokes the session instead of
+		// retrying on every refresh cycle.
+		return nil, fmt.Errorf("%s: %w", err, errPermanentRefresh)
 	}
 	if tr.AccessToken == "" {
 		return nil, errors.Wrapf(errors.InvalidArgument,
