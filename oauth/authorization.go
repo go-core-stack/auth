@@ -59,10 +59,9 @@ type tokenResponse struct {
 	IDToken      string `json:"id_token"`
 }
 
-// tokenResponseMapperFunc is the function signature for the optional
-// TokenResponseMapper callback. It is defined here for readability in the
-// internal function signatures.
-type tokenResponseMapperFunc func(raw []byte) (*TokenResponse, error)
+// tokenResponseMappers is the type for the optional per-server-URL mapper map.
+// It is defined here for readability in the internal function signatures.
+type tokenResponseMappers map[string]func(raw []byte) (*TokenResponse, error)
 
 // tokenResponseFromPublic converts a public TokenResponse (returned by a
 // consumer-supplied TokenResponseMapper) into the internal tokenResponse used
@@ -78,11 +77,16 @@ func tokenResponseFromPublic(pub *TokenResponse) tokenResponse {
 	}
 }
 
-// applyTokenResponseMapper calls the consumer-supplied mapper when the standard
-// token-endpoint parse yielded an empty AccessToken. It is the shared mapper
-// application logic used by both handleCallback and refreshTokenExchange.
-func applyTokenResponseMapper(mapper tokenResponseMapperFunc, raw []byte, tr *tokenResponse, serverURL string) error {
-	if tr.AccessToken != "" || mapper == nil {
+// applyTokenResponseMapper looks up the consumer-supplied mapper for the given
+// serverURL and calls it when the standard token-endpoint parse yielded an empty
+// AccessToken. It is the shared mapper application logic used by both
+// handleCallback and refreshTokenExchange.
+func applyTokenResponseMapper(mappers tokenResponseMappers, raw []byte, tr *tokenResponse, serverURL string) error {
+	if tr.AccessToken != "" || mappers == nil {
+		return nil
+	}
+	mapper, ok := mappers[serverURL]
+	if !ok || mapper == nil {
 		return nil
 	}
 	mapped, err := mapper(raw)
@@ -124,7 +128,7 @@ func (m *OAuthManager) AuthorizationURL(ctx context.Context, opts AuthorizeOptio
 // authenticated session before calling this, and reject a mismatch, to prevent
 // login-CSRF / session-fixation.
 func (m *OAuthManager) HandleCallback(ctx context.Context, state string, code string) (*TokenEntry, error) {
-	return handleCallback(ctx, m.httpDo, m.serverTable, m.pendingTable, m.tokenTable, m.clientTable, state, code, m.config.TokenResponseMapper)
+	return handleCallback(ctx, m.httpDo, m.serverTable, m.pendingTable, m.tokenTable, m.clientTable, state, code, m.config.TokenResponseMappers)
 }
 
 // authorizationURL implements AuthorizationURL against the
@@ -213,7 +217,7 @@ func authorizationURL(ctx context.Context, servers serverCache, clients clientSt
 // pendingStore/serverCache/tokenWriter/clientStore/httpDoFunc interfaces so it is
 // unit-testable with fakes. The clientStore lets the exchange attach confidential
 // client authentication (client_secret_post) when the initiating client is one.
-func handleCallback(ctx context.Context, do httpDoFunc, servers serverCache, pending pendingStore, tokens tokenWriter, clients clientStore, state, code string, mapper tokenResponseMapperFunc) (*TokenEntry, error) {
+func handleCallback(ctx context.Context, do httpDoFunc, servers serverCache, pending pendingStore, tokens tokenWriter, clients clientStore, state, code string, mappers tokenResponseMappers) (*TokenEntry, error) {
 	if strings.TrimSpace(state) == "" {
 		return nil, errors.Wrap(errors.InvalidArgument, "oauth: callback state must not be empty")
 	}
@@ -293,7 +297,7 @@ func handleCallback(ctx context.Context, do httpDoFunc, servers serverCache, pen
 		return nil, errors.Wrapf(errors.GetErrCode(err),
 			"oauth: authorization code exchange failed for %s: %s", ps.ServerURL, err)
 	}
-	if err := applyTokenResponseMapper(mapper, raw, &tr, ps.ServerURL); err != nil {
+	if err := applyTokenResponseMapper(mappers, raw, &tr, ps.ServerURL); err != nil {
 		return nil, err
 	}
 	if tr.AccessToken == "" {

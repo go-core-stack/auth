@@ -133,7 +133,7 @@ func (m *OAuthManager) ListTokens(ctx context.Context, serverURL string, clientR
 // error classification is identical everywhere, and each owns the surrounding
 // lock and persistence. It is wired into the reconciler by NewOAuthManager.
 func (m *OAuthManager) refreshToken(ctx context.Context, key *TokenKey, entry *TokenEntry) (*TokenEntry, error) {
-	return refreshTokenExchange(ctx, m.httpDo, m.serverTable, m.clientTable, key, entry, m.config.TokenResponseMapper)
+	return refreshTokenExchange(ctx, m.httpDo, m.serverTable, m.clientTable, key, entry, m.config.TokenResponseMappers)
 }
 
 // getToken implements GetToken against the tokenStore/refreshLockerAPI/refreshFunc
@@ -265,7 +265,7 @@ func lockedRefresh(ctx context.Context, tokens tokenStore, locks refreshLockerAP
 // client and builds the refreshed TokenEntry. A missing refresh token, or an
 // invalid_grant / invalid_client response, is a permanent failure
 // (errPermanentRefresh); other failures are transient.
-func refreshTokenExchange(ctx context.Context, do httpDoFunc, servers serverCache, clients clientStore, key *TokenKey, entry *TokenEntry, mapper tokenResponseMapperFunc) (*TokenEntry, error) {
+func refreshTokenExchange(ctx context.Context, do httpDoFunc, servers serverCache, clients clientStore, key *TokenKey, entry *TokenEntry, mappers tokenResponseMappers) (*TokenEntry, error) {
 	if entry.RefreshPolicy == RefreshPolicyNoRefresh {
 		// The server issued a non-refreshable token (e.g. an offline token with
 		// no expiry). There is nothing to refresh — a normal terminal state, not
@@ -312,7 +312,7 @@ func refreshTokenExchange(ctx context.Context, do httpDoFunc, servers serverCach
 	if err != nil {
 		return nil, err
 	}
-	if err := applyTokenResponseMapper(mapper, raw, tr, key.ServerURL); err != nil {
+	if err := applyTokenResponseMapper(mappers, raw, tr, key.ServerURL); err != nil {
 		return nil, err
 	}
 	if tr.AccessToken == "" {
