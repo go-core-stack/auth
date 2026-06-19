@@ -315,7 +315,7 @@ func TestHandleCallback_SuccessfulExchange(t *testing.T) {
 		return jsonResponse(tokenResp), nil
 	}
 
-	entry, err := handleCallback(context.Background(), do, servers, pending, tokens, newFakeClientStore(), "state-1", "auth-code-1")
+	entry, err := handleCallback(context.Background(), do, servers, pending, tokens, newFakeClientStore(), "state-1", "auth-code-1", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -390,7 +390,7 @@ func TestHandleCallback_UnknownState(t *testing.T) {
 		return nil, nil
 	}
 
-	_, err := handleCallback(context.Background(), do, servers, pending, tokens, newFakeClientStore(), "missing", "code")
+	_, err := handleCallback(context.Background(), do, servers, pending, tokens, newFakeClientStore(), "missing", "code", nil)
 	if err == nil {
 		t.Fatal("expected error for unknown/expired state")
 	}
@@ -412,10 +412,10 @@ func TestHandleCallback_EmptyStateOrCode(t *testing.T) {
 	}
 
 	clients := newFakeClientStore()
-	if _, err := handleCallback(context.Background(), do, servers, pending, tokens, clients, "", "code"); !errors.IsInvalidArgument(err) {
+	if _, err := handleCallback(context.Background(), do, servers, pending, tokens, clients, "", "code", nil); !errors.IsInvalidArgument(err) {
 		t.Errorf("empty state: expected InvalidArgument, got %v", err)
 	}
-	if _, err := handleCallback(context.Background(), do, servers, pending, tokens, clients, "state", ""); !errors.IsInvalidArgument(err) {
+	if _, err := handleCallback(context.Background(), do, servers, pending, tokens, clients, "state", "", nil); !errors.IsInvalidArgument(err) {
 		t.Errorf("empty code: expected InvalidArgument, got %v", err)
 	}
 }
@@ -439,7 +439,7 @@ func TestHandleCallback_ExchangeFailureKeepsPending(t *testing.T) {
 		return statusResponse(http.StatusBadRequest), nil
 	}
 
-	_, err := handleCallback(context.Background(), do, servers, pending, tokens, newFakeClientStore(), "state-1", "auth-code-1")
+	_, err := handleCallback(context.Background(), do, servers, pending, tokens, newFakeClientStore(), "state-1", "auth-code-1", nil)
 	if err == nil {
 		t.Fatal("expected error when token exchange fails")
 	}
@@ -472,7 +472,7 @@ func TestHandleCallback_NoAccessToken(t *testing.T) {
 		return jsonResponse(`{"token_type":"Bearer","expires_in":3600}`), nil
 	}
 
-	_, err := handleCallback(context.Background(), do, servers, pending, tokens, newFakeClientStore(), "state-1", "auth-code-1")
+	_, err := handleCallback(context.Background(), do, servers, pending, tokens, newFakeClientStore(), "state-1", "auth-code-1", nil)
 	if err == nil {
 		t.Fatal("expected error when response has no access_token")
 	}
@@ -505,7 +505,7 @@ func TestHandleCallback_ExpiredPendingState(t *testing.T) {
 		return nil, nil
 	}
 
-	_, err := handleCallback(context.Background(), do, servers, pending, tokens, newFakeClientStore(), "state-1", "auth-code-1")
+	_, err := handleCallback(context.Background(), do, servers, pending, tokens, newFakeClientStore(), "state-1", "auth-code-1", nil)
 	if !errors.IsNotFound(err) {
 		t.Fatalf("expected NotFound for expired state, got %v", err)
 	}
@@ -572,7 +572,7 @@ func TestHandleCallback_ClientRefRoundTrip(t *testing.T) {
 	}
 
 	do := func(_ *http.Request) (*http.Response, error) { return jsonResponse(tokenResp), nil }
-	entry, err := handleCallback(context.Background(), do, servers, pending, tokens, clients, params.State, "auth-code-1")
+	entry, err := handleCallback(context.Background(), do, servers, pending, tokens, clients, params.State, "auth-code-1", nil)
 	if err != nil {
 		t.Fatalf("callback: %v", err)
 	}
@@ -619,7 +619,7 @@ func TestHandleCallback_ConfidentialSendsSecret(t *testing.T) {
 		return jsonResponse(tokenResp), nil
 	}
 
-	if _, err := handleCallback(context.Background(), do, servers, pending, tokens, clients, "state-1", "auth-code-1"); err != nil {
+	if _, err := handleCallback(context.Background(), do, servers, pending, tokens, clients, "state-1", "auth-code-1", nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if sentForm.Get("client_id") != "client-tenant-a" {
@@ -656,7 +656,7 @@ func TestHandleCallback_PublicNoSecret(t *testing.T) {
 		return jsonResponse(tokenResp), nil
 	}
 
-	if _, err := handleCallback(context.Background(), do, servers, pending, tokens, clients, "state-1", "auth-code-1"); err != nil {
+	if _, err := handleCallback(context.Background(), do, servers, pending, tokens, clients, "state-1", "auth-code-1", nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if sentForm.Get("client_id") != "client-tenant-a" {
@@ -698,7 +698,7 @@ func TestHandleCallback_ClientIDMismatchFallsBack(t *testing.T) {
 		return jsonResponse(tokenResp), nil
 	}
 
-	if _, err := handleCallback(context.Background(), do, servers, pending, tokens, clients, "state-1", "auth-code-1"); err != nil {
+	if _, err := handleCallback(context.Background(), do, servers, pending, tokens, clients, "state-1", "auth-code-1", nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if sentForm.Get("client_id") != "client-OLD" {

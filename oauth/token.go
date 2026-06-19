@@ -133,7 +133,7 @@ func (m *OAuthManager) ListTokens(ctx context.Context, serverURL string, clientR
 // error classification is identical everywhere, and each owns the surrounding
 // lock and persistence. It is wired into the reconciler by NewOAuthManager.
 func (m *OAuthManager) refreshToken(ctx context.Context, key *TokenKey, entry *TokenEntry) (*TokenEntry, error) {
-	return refreshTokenExchange(ctx, m.httpDo, m.serverTable, m.clientTable, key, entry)
+	return refreshTokenExchange(ctx, m.httpDo, m.serverTable, m.clientTable, key, entry, m.config.TokenResponseMappers)
 }
 
 // getToken implements GetToken against the tokenStore/refreshLockerAPI/refreshFunc
@@ -265,7 +265,7 @@ func lockedRefresh(ctx context.Context, tokens tokenStore, locks refreshLockerAP
 // client and builds the refreshed TokenEntry. A missing refresh token, or an
 // invalid_grant / invalid_client response, is a permanent failure
 // (errPermanentRefresh); other failures are transient.
-func refreshTokenExchange(ctx context.Context, do httpDoFunc, servers serverCache, clients clientStore, key *TokenKey, entry *TokenEntry) (*TokenEntry, error) {
+func refreshTokenExchange(ctx context.Context, do httpDoFunc, servers serverCache, clients clientStore, key *TokenKey, entry *TokenEntry, mappers *TokenResponseMappers) (*TokenEntry, error) {
 	if entry.RefreshPolicy == RefreshPolicyNoRefresh {
 		// The server issued a non-refreshable token (e.g. an offline token with
 		// no expiry). There is nothing to refresh — a normal terminal state, not
@@ -308,9 +308,16 @@ func refreshTokenExchange(ctx context.Context, do httpDoFunc, servers serverCach
 	// that reject an explicit scope on refresh. The granted scope is preserved
 	// from the response (or the prior entry) in refreshedTokenEntry.
 
-	tr, err := postTokenEndpoint(ctx, do, server.TokenEndpoint, form)
+	tr, raw, err := postTokenEndpoint(ctx, do, server.TokenEndpoint, form)
 	if err != nil {
 		return nil, err
+	}
+	if err := applyTokenResponseMapper(mappers, raw, tr, key.ServerURL); err != nil {
+		// A mapper failure is a programmer error in the consumer-supplied
+		// function — it is not transient and will not fix itself. Classify it
+		// as permanent so the reconciler revokes the session instead of
+		// retrying on every refresh cycle.
+		return nil, fmt.Errorf("%s: %w", err, errPermanentRefresh)
 	}
 	if tr.AccessToken == "" {
 		return nil, errors.Wrapf(errors.InvalidArgument,
@@ -525,18 +532,20 @@ func (k *TokenKey) id() string {
 // the JSON token response. On a non-2xx response it parses the RFC 6749 §5.2
 // error body and classifies invalid_grant / invalid_client as permanent
 // (errPermanentRefresh); every other failure is returned as a transient error.
-// The response body is bounded by maxMetadataBytes.
-func postTokenEndpoint(ctx context.Context, do httpDoFunc, endpoint string, form url.Values) (*tokenResponse, error) {
+// The response body is bounded by maxMetadataBytes. The raw response bytes are
+// returned alongside the parsed response so callers can apply a
+// TokenResponseMapper when the standard parse yields an empty access_token.
+func postTokenEndpoint(ctx context.Context, do httpDoFunc, endpoint string, form url.Values) (*tokenResponse, []byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
-		return nil, errors.Wrapf(errors.InvalidArgument, "oauth: failed to build request for %s: %s", endpoint, err)
+		return nil, nil, errors.Wrapf(errors.InvalidArgument, "oauth: failed to build request for %s: %s", endpoint, err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := do(req)
 	if err != nil {
-		return nil, errors.Wrapf(errors.Unknown, "oauth: request to %s failed: %s", endpoint, err)
+		return nil, nil, errors.Wrapf(errors.Unknown, "oauth: request to %s failed: %s", endpoint, err)
 	}
 	limited := io.LimitReader(resp.Body, maxMetadataBytes)
 	defer func() {
@@ -546,18 +555,18 @@ func postTokenEndpoint(ctx context.Context, do httpDoFunc, endpoint string, form
 
 	raw, err := io.ReadAll(limited)
 	if err != nil {
-		return nil, errors.Wrapf(errors.Unknown, "oauth: failed to read response from %s: %s", endpoint, err)
+		return nil, nil, errors.Wrapf(errors.Unknown, "oauth: failed to read response from %s: %s", endpoint, err)
 	}
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return nil, classifyTokenError(endpoint, resp.StatusCode, raw)
+		return nil, nil, classifyTokenError(endpoint, resp.StatusCode, raw)
 	}
 
 	var tr tokenResponse
 	if err := json.Unmarshal(raw, &tr); err != nil {
-		return nil, errors.Wrapf(errors.InvalidArgument, "oauth: failed to parse token response from %s: %s", endpoint, err)
+		return nil, nil, errors.Wrapf(errors.InvalidArgument, "oauth: failed to parse token response from %s: %s", endpoint, err)
 	}
-	return &tr, nil
+	return &tr, raw, nil
 }
 
 // classifyTokenError turns a non-2xx token-endpoint response into a permanent

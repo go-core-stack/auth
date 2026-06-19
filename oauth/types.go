@@ -209,6 +209,58 @@ type TokenRefreshLockKey struct {
 
 // --- options / params ---
 
+// TokenResponse is the public representation of an OAuth token-endpoint
+// response. It is the return type of a TokenResponseMappers entry, allowing
+// consumers to normalize provider-specific JSON structures into the standard
+// fields the library expects. The fields mirror the RFC 6749 §5.1
+// access-token response.
+type TokenResponse struct {
+	AccessToken  string `json:"access_token"`
+	TokenType    string `json:"token_type"`
+	ExpiresIn    int64  `json:"expires_in"`
+	RefreshToken string `json:"refresh_token"`
+	Scope        string `json:"scope"`
+	IDToken      string `json:"id_token"`
+}
+
+// TokenResponseMappers holds per-server-URL mapper functions that normalize
+// non-standard token-endpoint responses. It owns URL normalization on both
+// Register and lookup so the consumer never needs to worry about trailing
+// slashes or whitespace in server URLs.
+//
+// The zero value is not usable; create instances with NewTokenResponseMappers.
+type TokenResponseMappers struct {
+	m map[string]func(raw []byte) (*TokenResponse, error)
+}
+
+// NewTokenResponseMappers returns an initialized TokenResponseMappers ready
+// for Register calls.
+func NewTokenResponseMappers() *TokenResponseMappers {
+	return &TokenResponseMappers{
+		m: make(map[string]func(raw []byte) (*TokenResponse, error)),
+	}
+}
+
+// Register associates a mapper function with a server URL. The URL is
+// normalized (trimmed, trailing-slash stripped) before storing so a lookup
+// with any variant of the same URL matches.
+func (t *TokenResponseMappers) Register(serverURL string, mapper func(raw []byte) (*TokenResponse, error)) {
+	if t == nil {
+		return
+	}
+	t.m[normalizeServerURL(serverURL)] = mapper
+}
+
+// lookup returns the mapper registered for the given server URL, or nil if
+// none is registered. The URL is normalized before lookup. A nil receiver is
+// safe and returns nil.
+func (t *TokenResponseMappers) lookup(serverURL string) func(raw []byte) (*TokenResponse, error) {
+	if t == nil || t.m == nil {
+		return nil
+	}
+	return t.m[normalizeServerURL(serverURL)]
+}
+
 // OAuthConfig configures an OAuthManager. Only RedirectURI is conceptually
 // required for flows; the remaining fields carry sensible defaults.
 type OAuthConfig struct {
@@ -217,6 +269,24 @@ type OAuthConfig struct {
 	ClientName   string       // for dynamic registration metadata
 	EncryptorKey string       // optional, falls back to ENCRYPTOR_KEY env
 	HTTPClient   *http.Client // optional, defaults to 30s-timeout client
+
+	// TokenResponseMappers holds optional per-server-URL mapper functions
+	// that normalize non-standard token-endpoint responses. When a
+	// token-endpoint response does not contain a top-level access_token (per
+	// RFC 6749 §5.1), the library looks up a mapper for the requesting server
+	// URL. If found, it is called with the raw JSON response body; the
+	// returned TokenResponse fields are merged field-by-field into the
+	// standard parse (only non-zero fields from the mapper overwrite). This
+	// supports providers (e.g. Slack) whose token responses embed the access
+	// token inside a provider-specific object rather than at the top level.
+	// If no mapper is registered for the server (or the field is nil), the
+	// library requires a top-level access_token and returns an error when it
+	// is absent.
+	//
+	// Create with NewTokenResponseMappers and populate via Register before
+	// passing to NewOAuthManager. The value must not be mutated after
+	// NewOAuthManager returns.
+	TokenResponseMappers *TokenResponseMappers
 }
 
 // RegisterClientOptions parameterizes dynamic client registration.
