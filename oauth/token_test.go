@@ -472,7 +472,7 @@ func TestRefreshTokenExchange_Success(t *testing.T) {
 	}
 
 	prev := &TokenEntry{AccessToken: "old", RefreshToken: "rt-old", Scopes: []string{"read", "write"}, State: SessionFailed}
-	got, err := refreshTokenExchange(context.Background(), do, servers, clients, testTokenKey(), prev)
+	got, err := refreshTokenExchange(context.Background(), do, servers, clients, testTokenKey(), prev, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -577,7 +577,7 @@ func TestRefreshTokenExchange_ConfidentialSendsSecret(t *testing.T) {
 	}
 
 	prev := &TokenEntry{AccessToken: "old", RefreshToken: "rt-old", State: SessionActive}
-	if _, err := refreshTokenExchange(context.Background(), do, servers, clients, testTokenKey(), prev); err != nil {
+	if _, err := refreshTokenExchange(context.Background(), do, servers, clients, testTokenKey(), prev, nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if sentForm.Get("client_id") != "client-abc" {
@@ -603,7 +603,7 @@ func TestRefreshTokenExchange_PublicNoSecret(t *testing.T) {
 	}
 
 	prev := &TokenEntry{AccessToken: "old", RefreshToken: "rt-old", State: SessionActive}
-	if _, err := refreshTokenExchange(context.Background(), do, servers, clients, testTokenKey(), prev); err != nil {
+	if _, err := refreshTokenExchange(context.Background(), do, servers, clients, testTokenKey(), prev, nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if sentForm.Get("client_id") != "client-abc" {
@@ -625,7 +625,7 @@ func TestRefreshTokenExchange_KeepsPriorRefreshToken(t *testing.T) {
 		return jsonResponse(`{"access_token":"at-new","token_type":"Bearer","expires_in":3600}`), nil
 	}
 	prev := &TokenEntry{AccessToken: "old", RefreshToken: "rt-keep", State: SessionActive}
-	got, err := refreshTokenExchange(context.Background(), do, servers, clients, testTokenKey(), prev)
+	got, err := refreshTokenExchange(context.Background(), do, servers, clients, testTokenKey(), prev, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -651,7 +651,7 @@ func TestRefreshTokenExchange_MissingExpiresInResetsExpiry(t *testing.T) {
 	stalePast := time.Now().Add(-time.Hour).Unix()
 	prev := &TokenEntry{AccessToken: "old", RefreshToken: "rt", State: SessionActive, ExpiresAt: stalePast}
 
-	got, err := refreshTokenExchange(context.Background(), do, servers, clients, testTokenKey(), prev)
+	got, err := refreshTokenExchange(context.Background(), do, servers, clients, testTokenKey(), prev, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -671,7 +671,7 @@ func TestRefreshTokenExchange_NoRefreshTokenIsPermanent(t *testing.T) {
 		return nil, nil
 	}
 	prev := &TokenEntry{AccessToken: "old", State: SessionActive} // no RefreshToken
-	_, err := refreshTokenExchange(context.Background(), do, servers, clients, testTokenKey(), prev)
+	_, err := refreshTokenExchange(context.Background(), do, servers, clients, testTokenKey(), prev, nil)
 	if !errors.Is(err, errPermanentRefresh) {
 		t.Fatalf("a missing refresh token must be a permanent failure, got %v", err)
 	}
@@ -688,7 +688,7 @@ func TestRefreshTokenExchange_NoRefreshPolicyReturnsEntry(t *testing.T) {
 		return nil, nil
 	}
 	entry := &TokenEntry{AccessToken: "offline-at", RefreshPolicy: RefreshPolicyNoRefresh, State: SessionActive}
-	got, err := refreshTokenExchange(context.Background(), do, servers, clients, testTokenKey(), entry)
+	got, err := refreshTokenExchange(context.Background(), do, servers, clients, testTokenKey(), entry, nil)
 	if err != nil {
 		t.Fatalf("NoRefresh must not be an error, got %v", err)
 	}
@@ -708,7 +708,7 @@ func TestRefreshTokenExchange_RefreshableEmptyTokenIsPermanent(t *testing.T) {
 		return nil, nil
 	}
 	entry := &TokenEntry{AccessToken: "old", RefreshPolicy: RefreshPolicyRefreshable, State: SessionActive} // no RefreshToken
-	_, err := refreshTokenExchange(context.Background(), do, servers, clients, testTokenKey(), entry)
+	_, err := refreshTokenExchange(context.Background(), do, servers, clients, testTokenKey(), entry, nil)
 	if !errors.Is(err, errPermanentRefresh) {
 		t.Fatalf("Refreshable + empty token must be permanent, got %v", err)
 	}
@@ -766,7 +766,7 @@ func assertRefreshClassification(t *testing.T, status int, body string, wantPerm
 	do := func(_ *http.Request) (*http.Response, error) { return jsonStatusResponse(status, body), nil }
 
 	prev := &TokenEntry{RefreshToken: "rt", State: SessionActive}
-	_, err := refreshTokenExchange(context.Background(), do, servers, clients, testTokenKey(), prev)
+	_, err := refreshTokenExchange(context.Background(), do, servers, clients, testTokenKey(), prev, nil)
 	if err == nil {
 		t.Fatalf("expected an error for HTTP %d", status)
 	}

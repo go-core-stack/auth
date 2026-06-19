@@ -141,7 +141,7 @@ func TestEndToEndFlow(t *testing.T) {
 		return discoverServer(ctx, do, servers, serverURL)
 	}
 	refresh := func(ctx context.Context, key *TokenKey, entry *TokenEntry) (*TokenEntry, error) {
-		return refreshTokenExchange(ctx, do, servers, clients, key, entry)
+		return refreshTokenExchange(ctx, do, servers, clients, key, entry, nil)
 	}
 	const accountID = "acct-1"
 
@@ -182,7 +182,7 @@ func TestEndToEndFlow(t *testing.T) {
 	}
 
 	// 4. Callback — exchange the code, persist the token, consume pending state.
-	token, err := handleCallback(ctx, do, servers, pending, tokens, clients, params.State, "auth-code-xyz")
+	token, err := handleCallback(ctx, do, servers, pending, tokens, clients, params.State, "auth-code-xyz", nil)
 	if err != nil {
 		t.Fatalf("callback: %v", err)
 	}
