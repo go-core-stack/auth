@@ -177,11 +177,23 @@ func authorizationURL(ctx context.Context, servers serverCache, clients clientSt
 			"oauth: server %s does not advertise an authorization endpoint", normalized)
 	}
 
-	// PKCE (S256) and CSRF state, both from crypto/rand.
-	verifier, err := generateRandomToken(codeVerifierBytes)
-	if err != nil {
-		return nil, errors.Wrapf(errors.GetErrCode(err), "oauth: failed to generate PKCE verifier: %s", err)
+	// PKCE (S256) — generate verifier and challenge unless the consumer has
+	// explicitly disabled PKCE (e.g., Meta System User tokens reject
+	// code_challenge). When disabled, both fields remain empty strings and
+	// the PendingAuthState stores an empty CodeVerifier, which handleCallback
+	// uses as the signal to omit code_verifier from the token exchange.
+	var verifier, challenge, challengeMethod string
+	if !opts.DisablePKCE {
+		var err error
+		verifier, err = generateRandomToken(codeVerifierBytes)
+		if err != nil {
+			return nil, errors.Wrapf(errors.GetErrCode(err), "oauth: failed to generate PKCE verifier: %s", err)
+		}
+		challenge = codeChallengeS256(verifier)
+		challengeMethod = CodeChallengeMethodS256
 	}
+
+	// CSRF state, always from crypto/rand (independent of PKCE).
 	state, err := generateRandomToken(stateBytes)
 	if err != nil {
 		return nil, errors.Wrapf(errors.GetErrCode(err), "oauth: failed to generate CSRF state: %s", err)
@@ -190,6 +202,8 @@ func authorizationURL(ctx context.Context, servers serverCache, clients clientSt
 	// Persist the transient state; the verifier is encrypted at rest by
 	// PendingAuthState.MarshalBSON. Everything needed to finish the exchange
 	// lives here, so the callback needs no in-memory session.
+	// When PKCE is disabled, CodeVerifier is stored as "" — handleCallback
+	// checks for this and omits code_verifier from the exchange form.
 	ps := &PendingAuthState{
 		ServerURL:    normalized,
 		ClientRef:    merged.ClientRef,
@@ -212,8 +226,8 @@ func authorizationURL(ctx context.Context, servers serverCache, clients clientSt
 		ResponseType:        responseTypeCode,
 		Scope:               strings.Join(merged.Scopes, " "),
 		State:               state,
-		CodeChallenge:       codeChallengeS256(verifier),
-		CodeChallengeMethod: CodeChallengeMethodS256,
+		CodeChallenge:       challenge,
+		CodeChallengeMethod: challengeMethod,
 		ExtraParams:         merged.ExtraParams,
 	}, nil
 }
@@ -260,16 +274,17 @@ func handleCallback(ctx context.Context, do httpDoFunc, servers serverCache, pen
 			"oauth: server %s has no usable token endpoint", ps.ServerURL)
 	}
 
-	// RFC 6749 §4.1.3 / RFC 7636 §4.5 authorization-code exchange, presenting the
-	// stored PKCE verifier. The client_id is the one that initiated the flow
-	// (persisted in the pending state), not whatever is currently registered: the
-	// authorization code is bound to the initiating client, so a re-registration
-	// between AuthorizationURL and HandleCallback must not change the client_id
-	// presented at the exchange.
+	// RFC 6749 §4.1.3 / RFC 7636 §4.5 authorization-code exchange.
+	// When PKCE was used (CodeVerifier is non-empty), present the stored
+	// verifier. When PKCE was disabled (CodeVerifier is empty), omit
+	// code_verifier entirely — the provider authenticates the exchange via
+	// client_secret instead.
 	form := url.Values{}
 	form.Set("grant_type", grantTypeAuthorizationCode)
 	form.Set("code", code)
-	form.Set("code_verifier", ps.CodeVerifier)
+	if ps.CodeVerifier != "" {
+		form.Set("code_verifier", ps.CodeVerifier)
+	}
 	form.Set("redirect_uri", ps.RedirectURI)
 
 	// Attach client authentication. A confidential client must present its

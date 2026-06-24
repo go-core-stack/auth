@@ -177,8 +177,8 @@ type PendingAuthState struct {
 	// ClientRef "".
 	ClientRef    string    `bson:"clientRef,omitempty"`
 	AccountID    string    `bson:"accountId"`
-	ClientID     string    `bson:"clientId"`     // client that initiated the flow
-	CodeVerifier string    `bson:"codeVerifier"` // encrypted at rest
+	ClientID     string    `bson:"clientId"` // client that initiated the flow
+	CodeVerifier string    `bson:"codeVerifier"`          // encrypted at rest; empty when PKCE is disabled
 	RedirectURI  string    `bson:"redirectUri"`
 	Scopes       []string  `bson:"scopes,omitempty"`
 	CreatedAt    time.Time `bson:"createdAt"` // TTL index field (10 min)
@@ -325,6 +325,14 @@ type AuthorizeOptions struct {
 	RedirectURI string            // defaults to OAuthConfig.RedirectURI
 	Scopes      []string          // defaults to OAuthConfig.Scopes
 	ExtraParams map[string]string // e.g. {"resource": "https://mcp.vercel.com"}
+
+	// DisablePKCE, when true, skips PKCE code challenge generation in the
+	// authorization request and omits the code_verifier from the token
+	// exchange. This is required for providers (e.g., Meta with System User
+	// access token type) that reject the code_challenge parameter outright.
+	// When PKCE is disabled, the provider must support client_secret-based
+	// authentication at the token endpoint instead.
+	DisablePKCE bool
 }
 
 // AuthorizationParams are the tokenized authorization request parameters
@@ -336,8 +344,8 @@ type AuthorizationParams struct {
 	ResponseType        string            // "code"
 	Scope               string            // space-delimited
 	State               string            // CSRF state (library-generated)
-	CodeChallenge       string            // PKCE (library-generated)
-	CodeChallengeMethod string            // "S256"
+	CodeChallenge       string            // PKCE (library-generated); empty when PKCE is disabled
+	CodeChallengeMethod string            // "S256"; empty when PKCE is disabled
 	ExtraParams         map[string]string // consumer-provided extras
 }
 
