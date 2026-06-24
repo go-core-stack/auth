@@ -311,6 +311,16 @@ func handleCallback(ctx context.Context, do httpDoFunc, servers serverCache, pen
 		form.Set("client_id", ps.ClientID)
 	}
 
+	// Defence-in-depth: when PKCE is disabled, the token exchange MUST have
+	// client_secret — it is the only proof of client identity. Fail fast if
+	// neither PKCE verifier nor client_secret is available (e.g., public client
+	// used with DisablePKCE, or confidential client lookup failed mid-flow).
+	if ps.CodeVerifier == "" && form.Get("client_secret") == "" {
+		return nil, errors.Wrap(errors.InvalidArgument,
+			"oauth: DisablePKCE is set but no client_secret is available for client "+
+				ps.ClientRef+"; a confidential client is required when PKCE is not used")
+	}
+
 	var tr tokenResponse
 	raw, err := postForm(ctx, do, server.TokenEndpoint, form, &tr)
 	if err != nil {
