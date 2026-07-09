@@ -73,8 +73,9 @@ func WithWriteTimeout(d time.Duration) MuxOption {
 
 // WithOriginChecker installs a custom Origin validation function that runs
 // before the WebSocket upgrade. Returning false rejects the request with
-// 403. When set, the library's built-in same-origin check is bypassed in
-// favour of this function, so it must fully validate the Origin.
+// 403. The library's built-in same-origin check is always disabled (services
+// behind auth-gateway see a rewritten Host that never matches Origin), so
+// this function is the sole origin gate when set.
 func WithOriginChecker(fn func(r *http.Request) bool) MuxOption {
 	return func(o *muxOptions) { o.originChecker = fn }
 }

@@ -200,15 +200,19 @@ func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (m *Mux) serve(w http.ResponseWriter, r *http.Request, info *actx.AuthInfo, paramNames []string, fn HandlerFunc) {
 	// Custom origin validation runs before the upgrade so we can reject with
 	// a plain 403 rather than a WebSocket close frame.
-	acceptOpts := &websocket.AcceptOptions{}
 	if m.opts.originChecker != nil {
 		if !m.opts.originChecker(r) {
 			http.Error(w, "forbidden origin", http.StatusForbidden)
 			return
 		}
-		// We have fully validated the origin ourselves; disable the
-		// library's built-in same-origin check.
-		acceptOpts.InsecureSkipVerify = true
+	}
+
+	// Services behind auth-gateway always see a rewritten Host header, so
+	// coder/websocket's default same-origin check (Origin == Host) would
+	// reject every legitimate upgrade. Disable it unconditionally and let
+	// consumers opt in to origin validation via WithOriginChecker.
+	acceptOpts := &websocket.AcceptOptions{
+		InsecureSkipVerify: true,
 	}
 
 	c, err := websocket.Accept(w, r, acceptOpts)
