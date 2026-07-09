@@ -3,6 +3,7 @@ module github.com/go-core-stack/auth
 go 1.24
 
 require (
+	github.com/coder/websocket v1.8.15
 	go.mongodb.org/mongo-driver/v2 v2.2.1
 	google.golang.org/grpc v1.73.0
 )
