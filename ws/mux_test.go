@@ -183,6 +183,50 @@ func TestServeHTTP_OriginCheckerRejects(t *testing.T) {
 	}
 }
 
+// TestServeHTTP_CrossOriginWithoutChecker verifies that the default mux (no
+// WithOriginChecker) accepts a WebSocket upgrade even when the Origin header
+// does not match the Host. This is the intended proxy-safe default: services
+// behind auth-gateway always see a rewritten Host, so the library's built-in
+// same-origin check is unconditionally disabled.
+func TestServeHTTP_CrossOriginWithoutChecker(t *testing.T) {
+	m := newTestMux() // no WithOriginChecker
+	m.registerHandler("/ws/cross", route.GET, func(ctx context.Context, wsc *WSContext) {
+		defer wsc.Conn.Close()
+		mt, msg, err := wsc.Conn.ReadMessage()
+		if err != nil {
+			return
+		}
+		_ = wsc.Conn.WriteMessage(mt, msg)
+	})
+
+	srv := httptest.NewServer(m)
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	h := authHeader(t, &actx.AuthInfo{UserName: "dave"})
+	h.Set("Origin", "https://different-origin.example.com")
+
+	c, _, err := websocket.Dial(ctx, dialURL(srv.URL, "/ws/cross"), &websocket.DialOptions{HTTPHeader: h})
+	if err != nil {
+		t.Fatalf("Dial with cross-origin must succeed without checker: %v", err)
+	}
+	defer c.CloseNow()
+
+	// Round-trip echo to confirm the connection is fully functional.
+	if err := c.Write(ctx, websocket.MessageText, []byte("cross-origin")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	mt, data, err := c.Read(ctx)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if mt != websocket.MessageText || string(data) != "cross-origin" {
+		t.Fatalf("echo mismatch: type=%v data=%q", mt, data)
+	}
+}
+
 func TestServeHTTP_GracefulCloseWhenHandlerReturns(t *testing.T) {
 	// The handler returns immediately and deliberately never calls
 	// Conn.Close(): the mux is responsible for tearing the connection down

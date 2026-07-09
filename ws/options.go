@@ -75,7 +75,9 @@ func WithWriteTimeout(d time.Duration) MuxOption {
 // before the WebSocket upgrade. Returning false rejects the request with
 // 403. The library's built-in same-origin check is always disabled (services
 // behind auth-gateway see a rewritten Host that never matches Origin), so
-// this function is the sole origin gate when set.
+// this function is the sole origin gate when set. When unset, no origin
+// validation is performed — callers using this mux outside auth-gateway
+// should always provide a checker.
 func WithOriginChecker(fn func(r *http.Request) bool) MuxOption {
 	return func(o *muxOptions) { o.originChecker = fn }
 }
