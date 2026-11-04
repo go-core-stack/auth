@@ -32,6 +32,14 @@ type Route struct {
 	Key      *Key   `bson:"key,omitempty"`
 	Endpoint string `bson:"endpoint,omitempty"`
 
+	// The route may be called while the platform is unlicensed, whatever
+	// the flags below say. A gateway that restricts an unlicensed platform
+	// lets every GET and HEAD through and refuses any other method unless
+	// the route sets this. Write it on every registration, false included:
+	// registration sets only the fields it is given, so a flag written only
+	// as true could never be withdrawn.
+	AllowUnlicensed *bool `bson:"allowUnlicensed,omitempty"`
+
 	// If the route is publically accessible, then rest of the fields
 	// below are not relevant
 	IsPublic *bool `bson:"isPublic,omitempty"`
