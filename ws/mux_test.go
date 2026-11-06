@@ -31,6 +31,15 @@ func newTestMux(opts ...MuxOption) *Mux {
 	}
 }
 
+// mustRegister wires a handler into the mux, failing the test if registration
+// is rejected.
+func mustRegister(t *testing.T, m *Mux, path string, method route.MethodType, fn HandlerFunc) {
+	t.Helper()
+	if err := m.registerHandler(path, method, fn); err != nil {
+		t.Fatalf("registerHandler(%q): %v", path, err)
+	}
+}
+
 // authHeader builds an http.Header carrying a valid Auth-Info header for info.
 func authHeader(t *testing.T, info *actx.AuthInfo) http.Header {
 	t.Helper()
@@ -55,8 +64,8 @@ func TestServeHTTP_EchoWithAuthAndPathParams(t *testing.T) {
 	got := make(chan captured, 1)
 
 	m := newTestMux()
-	m.registerHandler("/ws/echo/{id}", route.GET, func(ctx context.Context, wsc *WSContext) {
-		defer wsc.Conn.Close()
+	mustRegister(t, m, "/ws/echo/{id}", route.GET, func(ctx context.Context, wsc *WSContext) {
+		defer func() { _ = wsc.Conn.Close() }()
 		got <- captured{
 			user:   wsc.AuthInfo.UserName,
 			id:     wsc.PathParams["id"],
@@ -82,7 +91,7 @@ func TestServeHTTP_EchoWithAuthAndPathParams(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
-	defer c.CloseNow()
+	defer func() { _ = c.CloseNow() }()
 
 	if err := c.Write(ctx, websocket.MessageText, []byte("hello")); err != nil {
 		t.Fatalf("Write: %v", err)
@@ -113,7 +122,7 @@ func TestServeHTTP_EchoWithAuthAndPathParams(t *testing.T) {
 
 func TestServeHTTP_RejectsMissingAuth(t *testing.T) {
 	m := newTestMux()
-	m.registerHandler("/ws/x", route.GET, func(ctx context.Context, wsc *WSContext) {
+	mustRegister(t, m, "/ws/x", route.GET, func(ctx context.Context, wsc *WSContext) {
 		t.Error("handler must not run without auth")
 	})
 
@@ -126,7 +135,7 @@ func TestServeHTTP_RejectsMissingAuth(t *testing.T) {
 	// No Auth-Info header: the upgrade must be rejected before it happens.
 	c, resp, err := websocket.Dial(ctx, dialURL(srv.URL, "/ws/x"), nil)
 	if err == nil {
-		c.CloseNow()
+		_ = c.CloseNow()
 		t.Fatal("Dial succeeded, want rejection")
 	}
 	if resp == nil || resp.StatusCode != http.StatusUnauthorized {
@@ -136,7 +145,7 @@ func TestServeHTTP_RejectsMissingAuth(t *testing.T) {
 
 func TestServeHTTP_NotFound(t *testing.T) {
 	m := newTestMux()
-	m.registerHandler("/ws/known", route.GET, func(ctx context.Context, wsc *WSContext) {})
+	mustRegister(t, m, "/ws/known", route.GET, func(ctx context.Context, wsc *WSContext) {})
 
 	srv := httptest.NewServer(m)
 	defer srv.Close()
@@ -149,7 +158,7 @@ func TestServeHTTP_NotFound(t *testing.T) {
 		HTTPHeader: authHeader(t, &actx.AuthInfo{UserName: "bob"}),
 	})
 	if err == nil {
-		c.CloseNow()
+		_ = c.CloseNow()
 		t.Fatal("Dial succeeded, want 404")
 	}
 	if resp == nil || resp.StatusCode != http.StatusNotFound {
@@ -161,7 +170,7 @@ func TestServeHTTP_OriginCheckerRejects(t *testing.T) {
 	m := newTestMux(WithOriginChecker(func(r *http.Request) bool {
 		return r.Header.Get("Origin") == "https://allowed.example.com"
 	}))
-	m.registerHandler("/ws/o", route.GET, func(ctx context.Context, wsc *WSContext) {
+	mustRegister(t, m, "/ws/o", route.GET, func(ctx context.Context, wsc *WSContext) {
 		t.Error("handler must not run for rejected origin")
 	})
 
@@ -175,7 +184,7 @@ func TestServeHTTP_OriginCheckerRejects(t *testing.T) {
 	h.Set("Origin", "https://evil.example.com")
 	c, resp, err := websocket.Dial(ctx, dialURL(srv.URL, "/ws/o"), &websocket.DialOptions{HTTPHeader: h})
 	if err == nil {
-		c.CloseNow()
+		_ = c.CloseNow()
 		t.Fatal("Dial succeeded, want 403")
 	}
 	if resp == nil || resp.StatusCode != http.StatusForbidden {
@@ -189,7 +198,7 @@ func TestServeHTTP_GracefulCloseWhenHandlerReturns(t *testing.T) {
 	// (via the lifecycle-cancellation watchdog and the trailing graceful
 	// close), so the client must still observe a clean close frame.
 	m := newTestMux(WithPingInterval(0))
-	m.registerHandler("/ws/quick", route.GET, func(ctx context.Context, wsc *WSContext) {})
+	mustRegister(t, m, "/ws/quick", route.GET, func(ctx context.Context, wsc *WSContext) {})
 
 	srv := httptest.NewServer(m)
 	defer srv.Close()
@@ -203,7 +212,7 @@ func TestServeHTTP_GracefulCloseWhenHandlerReturns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
-	defer c.CloseNow()
+	defer func() { _ = c.CloseNow() }()
 
 	// A read must fail with a websocket close status rather than hang or
 	// return a raw connection-reset error.

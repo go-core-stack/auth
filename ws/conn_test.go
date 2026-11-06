@@ -32,8 +32,8 @@ func TestConnReadWriteJSON(t *testing.T) {
 	}
 
 	m := newTestMux()
-	m.registerHandler("/ws/json", route.GET, func(ctx context.Context, wsc *WSContext) {
-		defer wsc.Conn.Close()
+	mustRegister(t, m, "/ws/json", route.GET, func(ctx context.Context, wsc *WSContext) {
+		defer func() { _ = wsc.Conn.Close() }()
 		var in payload
 		if err := wsc.Conn.ReadJSON(&in); err != nil {
 			return
@@ -54,7 +54,7 @@ func TestConnReadWriteJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
-	defer c.CloseNow()
+	defer func() { _ = c.CloseNow() }()
 
 	if err := wsjson.Write(ctx, c, payload{Msg: "ping", N: 1}); err != nil {
 		t.Fatalf("write: %v", err)

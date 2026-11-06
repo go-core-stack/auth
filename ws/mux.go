@@ -222,7 +222,7 @@ func (m *Mux) serve(w http.ResponseWriter, r *http.Request, info *actx.AuthInfo,
 	}
 	// CloseNow is a no-op if the handler closed gracefully; it guarantees
 	// the connection is torn down on any exit path.
-	defer c.CloseNow()
+	defer func() { _ = c.CloseNow() }()
 
 	if m.opts.maxMessageSize > 0 {
 		c.SetReadLimit(m.opts.maxMessageSize)

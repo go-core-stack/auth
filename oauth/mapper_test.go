@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -346,13 +345,3 @@ var _ = jsonResponse
 // statusResponse is a test helper that builds a non-JSON HTTP response with the
 // given status code. Defined in the shared test helpers.
 var _ = statusResponse
-
-// Helper to build a simple JSON response for tests — mirrors the one in
-// authorization_test.go but avoids redeclaration by referencing the shared one.
-func mapperTestJSONResponse(body string) *http.Response {
-	return &http.Response{
-		StatusCode: http.StatusOK,
-		Body:       io.NopCloser(strings.NewReader(body)),
-		Header:     http.Header{"Content-Type": []string{"application/json"}},
-	}
-}
