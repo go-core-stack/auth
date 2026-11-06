@@ -177,8 +177,8 @@ type PendingAuthState struct {
 	// ClientRef "".
 	ClientRef    string    `bson:"clientRef,omitempty"`
 	AccountID    string    `bson:"accountId"`
-	ClientID     string    `bson:"clientId"` // client that initiated the flow
-	CodeVerifier string    `bson:"codeVerifier"`          // encrypted at rest; empty when PKCE is disabled
+	ClientID     string    `bson:"clientId"`     // client that initiated the flow
+	CodeVerifier string    `bson:"codeVerifier"` // encrypted at rest; empty when PKCE is disabled
 	RedirectURI  string    `bson:"redirectUri"`
 	Scopes       []string  `bson:"scopes,omitempty"`
 	CreatedAt    time.Time `bson:"createdAt"` // TTL index field (10 min)
